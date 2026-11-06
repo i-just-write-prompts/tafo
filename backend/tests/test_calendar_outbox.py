@@ -1,3 +1,5 @@
+import threading
+import time
 import urllib.parse
 import urllib.request
 from datetime import timedelta
@@ -436,3 +438,167 @@ def test_suggestion_does_not_rewrite_fixed_blocks(client):
     again = client.get("/api/calendar/blocks").json()["blocks"][0]
     assert again["starts_at"] == approved["block"]["starts_at"]
     assert again["version"] == approved["block"]["version"]
+
+
+class LookupLossTransport:
+    """Invite fails once, then lookup raises, then lookup returns no items."""
+
+    def __init__(self) -> None:
+        self.fail_patches = 1
+        self.lookup = "find"
+        self.posts = 0
+        self.events: dict[str, dict] = {}
+
+    def request(self, method, url, *, params=None, json_body=None, headers=None):
+        assert headers["Authorization"] == "Bearer test-token"
+        if method == "GET" and params and "privateExtendedProperty" in params:
+            if self.lookup == "raise":
+                raise TransportError(503, "lookup unavailable")
+            if self.lookup == "empty":
+                return {"items": []}
+            key = params["privateExtendedProperty"].split("=", 1)[1]
+            items = [
+                event
+                for event in self.events.values()
+                if event.get("extendedProperties", {}).get("private", {}).get("tafoEventKey") == key
+            ]
+            return {"items": items}
+        if method == "GET":
+            return {"items": list(self.events.values())}
+        if method == "POST" and url.endswith("/events"):
+            self.posts += 1
+            event_id = f"g{self.posts}"
+            event = {"id": event_id, **(json_body or {})}
+            self.events[event_id] = event
+            return event
+        if method == "POST" and url.endswith("/freeBusy"):
+            return {"calendars": {"cal-demo": {"busy": []}}}
+        if method == "PATCH":
+            if self.fail_patches > 0:
+                self.fail_patches -= 1
+                raise TransportError(500, "invite failed")
+            event_id = urllib.parse.unquote(url.rstrip("/").split("/")[-1])
+            self.events[event_id].update(json_body or {})
+            return self.events[event_id]
+        if method == "DELETE":
+            return {}
+        raise AssertionError(f"unexpected {method} {url}")
+
+
+def test_failed_lookup_keeps_google_id_and_empty_lookup_does_not_duplicate(tmp_path):
+    transport = LookupLossTransport()
+    adapter = GoogleCalendarAdapter(transport, "cal-demo", "worker@example.com", token="test-token")
+    app = create_app(_live_settings(tmp_path), adapter=adapter)
+    with TestClient(app) as client:
+        proposal = client.post(
+            "/api/hermes/proposals",
+            json={
+                "source": "tafo-ui",
+                "kind": "calendar_block",
+                "explanation": "Partial invite, then a lookup failure, then an empty lookup.",
+                "payload": {
+                    "domain": "work",
+                    "event_key": "evt_precise1",
+                    "starts_at": "2026-11-11T15:00:00Z",
+                    "ends_at": "2026-11-11T16:00:00Z",
+                    "invite_work_email": True,
+                },
+            },
+        ).json()
+        first = approve(client, proposal)
+        assert first["outbox"]["status"] == "partial"
+        assert first["outbox"]["google_event_id"] == "g1"
+        assert first["block"]["google_event_id"] == "g1"
+        assert transport.posts == 1
+
+        transport.lookup = "raise"
+        missed = client.post(f"/api/calendar/outbox/{first['outbox']['id']}/retry")
+        assert missed.status_code == 200, missed.text
+        missed_body = missed.json()
+        assert missed_body["operation"]["status"] == "failed"
+        assert missed_body["operation"]["google_event_id"] == "g1"
+        assert missed_body["operation"]["attempt_count"] == 2
+        assert missed_body["block"]["google_event_id"] == "g1"
+        assert "kept" in missed_body["operation"]["honest_label"].lower()
+        assert transport.posts == 1
+        assert list(transport.events) == ["g1"]
+
+        transport.lookup = "empty"
+        recovered = client.post(f"/api/calendar/outbox/{first['outbox']['id']}/retry")
+        assert recovered.status_code == 200, recovered.text
+        recovered_body = recovered.json()
+        assert recovered_body["operation"]["google_event_id"] == "g1"
+        assert recovered_body["operation"]["status"] == "synced"
+        assert recovered_body["block"]["google_event_id"] == "g1"
+        assert transport.posts == 1
+        assert list(transport.events) == ["g1"]
+
+
+class SlowCreateAdapter:
+    mode = "live"
+
+    def __init__(self) -> None:
+        self.creates = 0
+
+    def read_busy(self, start, end):
+        del start, end
+        return []
+
+    def create_block(self, event_key, payload, known_google_id=None):
+        del event_key, payload, known_google_id
+        self.creates += 1
+        time.sleep(6)
+        return AdapterResult(
+            ok=True,
+            status="synced",
+            sync_state="synced",
+            google_event_id="g-slow",
+            honest_label="Synced to Google Calendar.",
+            steps=[],
+            mode="live",
+        )
+
+    def update_block(self, event_key, payload, known_google_id=None):
+        return self.create_block(event_key, payload, known_google_id)
+
+    def cancel_block(self, event_key, payload, known_google_id=None):
+        return self.create_block(event_key, payload, known_google_id)
+
+
+def test_slow_calendar_write_leaves_task_reads_available(tmp_path):
+    adapter = SlowCreateAdapter()
+    app = create_app(_live_settings(tmp_path), adapter=adapter)
+    holder: dict[str, int] = {}
+
+    def read_tasks(reader: TestClient) -> None:
+        time.sleep(0.4)
+        response = reader.get("/api/tasks")
+        holder["status"] = response.status_code
+
+    with TestClient(app) as writer, TestClient(app) as reader:
+        proposal = writer.post(
+            "/api/hermes/proposals",
+            json={
+                "source": "tafo-ui",
+                "kind": "calendar_block",
+                "explanation": "Slow adapter must not lock task reads.",
+                "payload": {
+                    "domain": "work",
+                    "event_key": "evt_slow1",
+                    "starts_at": "2026-11-12T15:00:00Z",
+                    "ends_at": "2026-11-12T16:00:00Z",
+                },
+            },
+        ).json()
+        thread = threading.Thread(target=read_tasks, args=(reader,))
+        thread.start()
+        approved = writer.post(
+            f"/api/decisions/{proposal['id']}/approve",
+            json={"expected_version": proposal["version"], "confirmed": True},
+        )
+        thread.join(timeout=12)
+        assert thread.is_alive() is False
+        assert approved.status_code == 200, approved.text
+        assert holder["status"] == 200
+        assert adapter.creates == 1
+        assert approved.json()["outbox"]["google_event_id"] == "g-slow"

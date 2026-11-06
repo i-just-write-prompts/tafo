@@ -4,12 +4,16 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import time
 
 from tafo.audit import write_audit
 from tafo.calendar_adapter import AdapterResult, CalendarAdapter, StepRecord
 from tafo.config import Settings
+from tafo.db import read_session, session
 from tafo.problems import Problem
 from tafo.timeutil import new_id, utc_now_iso
+
+PROCESSING = "__tafo_processing__"
 
 OPERATIONS = {
     "calendar_block": "create",
@@ -176,64 +180,122 @@ def _apply_block(conn: sqlite3.Connection, row: sqlite3.Row, payload: dict, resu
     )
 
 
-def process_outbox(conn: sqlite3.Connection, adapter: CalendarAdapter, settings: Settings, outbox_id: str) -> dict:
-    row = conn.execute("SELECT * FROM outbox_operations WHERE id = ?", (outbox_id,)).fetchone()
-    if row is None:
+def _kept_google_id(settings: Settings, result: AdapterResult, known: str | None) -> str | None:
+    if settings.calendar_mode == "demo":
+        return None
+    if result.google_event_id:
+        return result.google_event_id
+    if result.status in {"failed", "partial"}:
+        return known
+    return None
+
+
+def _load_outbox(conn: sqlite3.Connection, outbox_id: str) -> sqlite3.Row | None:
+    return conn.execute("SELECT * FROM outbox_operations WHERE id = ?", (outbox_id,)).fetchone()
+
+
+def _wait_until_settled(settings: Settings, outbox_id: str, seen_attempt: int) -> dict:
+    """Another worker owns this attempt. Do not call the calendar again."""
+    deadline = time.monotonic() + 30
+    latest: sqlite3.Row | None = None
+    while time.monotonic() < deadline:
+        with read_session(settings.db_path) as conn:
+            latest = _load_outbox(conn, outbox_id)
+        if latest is None:
+            raise Problem(404, "not_found", "Outbox operation not found.")
+        if latest["status"] in {"simulated", "synced"}:
+            return serialize_outbox(latest)
+        if int(latest["attempt_count"]) > seen_attempt and latest["last_error"] != PROCESSING:
+            return serialize_outbox(latest)
+        time.sleep(0.05)
+    if latest is None:
         raise Problem(404, "not_found", "Outbox operation not found.")
-    if row["status"] in {"simulated", "synced"}:
-        return serialize_outbox(row)
-    payload = json.loads(row["payload_json"])
-    attempt = int(row["attempt_count"]) + 1
-    known = row["google_event_id"]
+    return serialize_outbox(latest)
+
+
+def _call_adapter(adapter: CalendarAdapter, operation: str, event_key: str, payload: dict, known: str | None) -> AdapterResult:
     try:
-        if row["operation"] == "create":
-            result = adapter.create_block(row["event_key"], payload, known)
-        elif row["operation"] == "update":
-            result = adapter.update_block(row["event_key"], payload, known)
-        elif row["operation"] == "cancel":
-            result = adapter.cancel_block(row["event_key"], payload, known)
-        else:
-            raise Problem(500, "bad_operation", "Unknown outbox operation.")
+        if operation == "create":
+            return adapter.create_block(event_key, payload, known)
+        if operation == "update":
+            return adapter.update_block(event_key, payload, known)
+        if operation == "cancel":
+            return adapter.cancel_block(event_key, payload, known)
+        raise Problem(500, "bad_operation", "Unknown outbox operation.")
+    except Problem:
+        raise
     except Exception as exc:
-        result = AdapterResult(
+        return AdapterResult(
             ok=False,
             status="failed",
             sync_state="not_synced",
             google_event_id=known,
-            honest_label="Not synced. The calendar adapter raised an error. No success is claimed.",
+            honest_label="Not synced. The calendar adapter raised an error. The recorded event id was kept when one existed.",
             steps=[StepRecord("adapter", False, str(exc)[:500])],
             error=str(exc)[:500],
             mode=adapter.mode,
         )
+
+
+def process_outbox(settings: Settings, adapter: CalendarAdapter, outbox_id: str) -> dict:
+    """Claim the attempt, call the adapter with no database lock, then store the result."""
+    with session(settings.db_path) as conn:
+        row = _load_outbox(conn, outbox_id)
+        if row is None:
+            raise Problem(404, "not_found", "Outbox operation not found.")
+        if row["status"] in {"simulated", "synced"}:
+            return serialize_outbox(row)
+        seen = int(row["attempt_count"])
+        known = row["google_event_id"]
+        payload = json.loads(row["payload_json"])
+        operation = row["operation"]
+        event_key = row["event_key"]
+        claimed = conn.execute(
+            """
+            UPDATE outbox_operations
+            SET attempt_count = attempt_count + 1, last_error = ?, updated_at = ?
+            WHERE id = ? AND attempt_count = ? AND status IN ('pending', 'failed', 'partial')
+              AND (last_error IS NULL OR last_error != ?)
+            """,
+            (PROCESSING, utc_now_iso(), outbox_id, seen, PROCESSING),
+        ).rowcount == 1
+    if not claimed:
+        return _wait_until_settled(settings, outbox_id, seen)
+
+    result = _call_adapter(adapter, operation, event_key, payload, known)
     if settings.calendar_mode == "demo" or getattr(adapter, "mode", "") == "demo":
         result = enforce_demo(result)
-    _apply_block(conn, row, payload, result, settings.calendar_mode)
-    now = utc_now_iso()
-    conn.execute(
-        """
-        UPDATE outbox_operations
-        SET status = ?, attempt_count = ?, google_event_id = ?, last_error = ?,
-            honest_label = ?, result_json = ?, updated_at = ?
-        WHERE id = ?
-        """,
-        (
-            result.status,
-            attempt,
-            None if settings.calendar_mode == "demo" else result.google_event_id,
-            result.error,
-            result.honest_label,
-            json.dumps(result.as_dict()),
-            now,
-            outbox_id,
-        ),
-    )
-    write_audit(
-        conn,
-        actor="human",
-        action="outbox.process",
-        entity_type="outbox",
-        entity_id=outbox_id,
-        detail={"status": result.status, "sync_state": result.sync_state, "attempt": attempt},
-    )
-    stored = conn.execute("SELECT * FROM outbox_operations WHERE id = ?", (outbox_id,)).fetchone()
-    return serialize_outbox(stored)
+    gid = _kept_google_id(settings, result, known)
+    with session(settings.db_path) as conn:
+        current = _load_outbox(conn, outbox_id)
+        if current is None:
+            raise Problem(404, "not_found", "Outbox operation not found.")
+        _apply_block(conn, current, payload, result, settings.calendar_mode)
+        now = utc_now_iso()
+        conn.execute(
+            """
+            UPDATE outbox_operations
+            SET status = ?, google_event_id = ?, last_error = ?,
+                honest_label = ?, result_json = ?, updated_at = ?
+            WHERE id = ?
+            """,
+            (
+                result.status,
+                gid,
+                result.error,
+                result.honest_label,
+                json.dumps(result.as_dict()),
+                now,
+                outbox_id,
+            ),
+        )
+        write_audit(
+            conn,
+            actor="human",
+            action="outbox.process",
+            entity_type="outbox",
+            entity_id=outbox_id,
+            detail={"status": result.status, "sync_state": result.sync_state, "attempt": int(current["attempt_count"])},
+        )
+        stored = _load_outbox(conn, outbox_id)
+        return serialize_outbox(stored)

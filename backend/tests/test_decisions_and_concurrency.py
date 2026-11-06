@@ -82,6 +82,85 @@ def test_agent_proposal_does_not_apply_until_a_person_approves(client):
     assert updated["title"] == "Northwind outline"
 
 
+def test_pending_edit_keeps_generic_title_until_a_custom_one_is_requested(client):
+    created = client.post(
+        "/api/hermes/proposals",
+        json={
+            "source": "tafo-ui",
+            "kind": "calendar_block",
+            "explanation": "Edit the time before approving.",
+            "payload": {
+                "domain": "work",
+                "event_key": "evt_edit_sample",
+                "starts_at": "2026-11-11T15:00:00Z",
+                "ends_at": "2026-11-11T16:00:00Z",
+            },
+        },
+    ).json()
+    stale = client.post(
+        f"/api/decisions/{created['id']}/edit",
+        json={"expected_version": created["version"] + 3, "confirmed": True, "payload": {"event_key": "evt_edit_sample"}},
+    )
+    assert stale.status_code == 409
+    edited = client.post(
+        f"/api/decisions/{created['id']}/edit",
+        json={
+            "expected_version": created["version"],
+            "confirmed": True,
+            "payload": {
+                "event_key": "evt_edit_sample",
+                "domain": "work",
+                "title": "Quarterly secret launch",
+                "starts_at": "2026-11-11T17:00:00Z",
+                "ends_at": "2026-11-11T18:00:00Z",
+            },
+        },
+    )
+    assert edited.status_code == 200, edited.text
+    body = edited.json()
+    assert body["status"] == "pending"
+    assert body["edited_payload"]["title"] == "Focus block"
+    assert body["edited_payload"]["starts_at"] == "2026-11-11T17:00:00Z"
+    assert body["edited_payload"]["event_key"] == "evt_edit_sample"
+    assert client.get("/api/calendar/blocks").json()["blocks"] == []
+    custom = client.post(
+        f"/api/decisions/{created['id']}/edit",
+        json={
+            "expected_version": body["version"],
+            "confirmed": True,
+            "payload": {
+                "event_key": "evt_edit_sample",
+                "domain": "work",
+                "allow_custom_title": True,
+                "title": "Riverside sample",
+                "starts_at": "2026-11-11T17:00:00Z",
+                "ends_at": "2026-11-11T18:00:00Z",
+            },
+        },
+    )
+    assert custom.status_code == 200, custom.text
+    assert custom.json()["status"] == "pending"
+    assert custom.json()["edited_payload"]["title"] == "Riverside sample"
+
+
+def test_task_title_and_notes_roundtrip(client):
+    task = add_task(client, title="Original sample", notes="first note")
+    saved = client.patch(
+        f"/api/tasks/{task['id']}",
+        json={"expected_version": task["version"], "title": "Renamed sample", "notes": "second note"},
+    )
+    assert saved.status_code == 200, saved.text
+    again = client.get(f"/api/tasks/{task['id']}").json()
+    assert again["title"] == "Renamed sample"
+    assert again["notes"] == "second note"
+    conflict = client.patch(
+        f"/api/tasks/{task['id']}",
+        json={"expected_version": task["version"], "title": "Stale sample"},
+    )
+    assert conflict.status_code == 409
+    assert client.get(f"/api/tasks/{task['id']}").json()["title"] == "Renamed sample"
+
+
 def test_reject_leaves_the_task_alone(client):
     task = add_task(client, title="Library hold", domain="personal", status="waiting")
     proposal = client.post(

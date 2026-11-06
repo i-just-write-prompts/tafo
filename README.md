@@ -6,11 +6,11 @@ TAFO keeps one list across work, home, and personal. **Work / Life / All are vie
 
 ## What you can do
 
-- Add tasks with a domain, status (`todo`, `doing`, `waiting`, `done`), an hour estimate, a due date, notes, and a short checklist.
+- Add tasks with a domain, status (`todo`, `doing`, `waiting`, `done`), an hour estimate, a due date, notes, and a short checklist. Edit the title and notes afterward; the save sends the version you loaded, and a conflict asks you to reload.
 - Split the list into **Today** and **Backlog**, and order each view by hand.
 - Run one timer at a time and see tracked time next to the estimate.
 - Edit and copy weekly bullets generated from tasks completed that week.
-- Let a local agent drop proposals in a Hermes inbox. Nothing about a task or calendar changes until you approve it.
+- Let a local agent drop proposals in a Hermes inbox. Nothing about a task or calendar changes until you approve it. A pending proposal can be edited first. Calendar times can change, and a custom title is used only when you ask for one; otherwise the generic title stays.
 - Approving a calendar block queues one outbox operation. Approving again, or retrying, reuses the same ids so the operation is not duplicated.
 - Default **demo** mode simulates that operation and labels it as **not synced**. It does not call Google.
 
@@ -20,7 +20,7 @@ Google Calendar is the write authority for app-owned blocks when you opt into li
 
 - Demo results use `sync_state: simulated` and say they are **not synced**. They never receive a Google event id.
 - Live mode without credentials **fails closed**. The outbox is `failed` / `not synced`. No success is claimed.
-- A partial live failure (event created, invitation step failed) stays visible, keeps the Google event id, and retry updates that same event instead of inserting another.
+- A partial live failure (event created, invitation step failed) stays visible, keeps the Google event id, and retry updates that same event instead of inserting another. A later lookup error keeps that id as well. An empty lookup does not create a second event for the same key.
 - Work blocks can ask Google to invite the address in `TAFO_WORK_INVITE_EMAIL`. The proposal cannot name an address. This is a normal calendar invitation so Outlook can show that one meeting. It does **not** read Outlook, and it does not bypass workplace policy.
 - Busy time is read before a calendar proposal is stored. Fixed appointments are not moved unless you approve that change and send `acknowledge_fixed_move`.
 - Availability is **not conflict-free**. Invite-only integration does not reveal existing Outlook meetings.
@@ -87,7 +87,7 @@ The adapter creates, updates, and cancels only events it tagged with `tafoEventK
 - A person approves, edits, or rejects at `/api/decisions/{id}/...` with `confirmed: true`.
 - The same paths under `/api/hermes/...` return 403.
 - Requests that send `X-TAFO-Actor: agent` cannot patch tasks, run timers, edit the week, approve, or restore a backup.
-- This header is an integration rule for cooperative agents. Loopback binding is the trust boundary, not a login.
+- This header is an integration rule for cooperative agents, not authentication. Omitting it, or sending `human`, does not prove who the caller is. Anything that can reach the loopback port can mutate data.
 
 Approving a calendar proposal inserts one outbox row. A second approval returns that row. `POST /api/calendar/outbox/{id}/retry` processes it again with the same event key.
 

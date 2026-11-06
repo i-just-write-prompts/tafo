@@ -19,6 +19,7 @@ def connect(db_path: Path) -> sqlite3.Connection:
 
 @contextmanager
 def session(db_path: Path) -> Iterator[sqlite3.Connection]:
+    """Short read-write transaction. Do not call the network while it is open."""
     conn = connect(db_path)
     try:
         conn.execute("BEGIN IMMEDIATE")
@@ -30,5 +31,15 @@ def session(db_path: Path) -> Iterator[sqlite3.Connection]:
         except sqlite3.Error:
             pass
         raise
+    finally:
+        conn.close()
+
+
+@contextmanager
+def read_session(db_path: Path) -> Iterator[sqlite3.Connection]:
+    """Autocommit reads. They stay available while a remote calendar call is in flight."""
+    conn = connect(db_path)
+    try:
+        yield conn
     finally:
         conn.close()

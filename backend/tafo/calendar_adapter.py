@@ -416,7 +416,7 @@ class GoogleCalendarAdapter:
             headers = self._headers()
             existing = self._find(event_key, headers)
         except (TransportError, CalendarNotConfigured) as exc:
-            return _live_failure("lookup_event", str(exc))
+            return _live_failure("lookup_event", str(exc), known_google_id)
         event_id = (existing or {}).get("id") or known_google_id
         if not event_id:
             steps.append(StepRecord("cancel_event", True, "No Google event exists for this key. Nothing to delete."))
@@ -477,8 +477,9 @@ class GoogleCalendarAdapter:
             headers = self._headers()
             existing = self._find(event_key, headers)
         except (TransportError, CalendarNotConfigured) as exc:
-            return _live_failure("lookup_event", str(exc))
+            return _live_failure("lookup_event", str(exc), known_google_id)
         body = self._body(event_key, payload)
+        # An empty lookup must update the id we already stored, not insert another event.
         event_id = (existing or {}).get("id") or known_google_id
         try:
             if event_id:
@@ -513,12 +514,16 @@ class GoogleCalendarAdapter:
                 steps.append(StepRecord("upsert_event", True, "Created one app-owned Google event.", event_id))
         except TransportError as exc:
             steps.append(StepRecord("upsert_event", False, exc.body, event_id))
+            kept = event_id or known_google_id
             return AdapterResult(
                 ok=False,
                 status="failed",
                 sync_state="not_synced",
-                google_event_id=event_id if existing else None,
-                honest_label="Not synced. Google Calendar write failed. No success is claimed.",
+                google_event_id=kept,
+                honest_label=(
+                    "Not synced. Google Calendar write failed. "
+                    + ("The recorded event id was kept. No new event was created." if kept else "No success is claimed.")
+                ),
                 steps=steps,
                 error=exc.body,
                 mode="live",
@@ -582,13 +587,20 @@ class GoogleCalendarAdapter:
         )
 
 
-def _live_failure(step: str, detail: str) -> AdapterResult:
+def _live_failure(step: str, detail: str, kept_id: str | None = None) -> AdapterResult:
+    if kept_id:
+        label = (
+            "Lookup failed before another write. The recorded Google event id was kept. "
+            "No new event was created. Not fully synced."
+        )
+    else:
+        label = "Not synced. The calendar request failed before a completed write. No success is claimed."
     return AdapterResult(
         ok=False,
         status="failed",
         sync_state="not_synced",
-        google_event_id=None,
-        honest_label="Not synced. The calendar request failed before a completed write. No success is claimed.",
+        google_event_id=kept_id,
+        honest_label=label,
         steps=[StepRecord(step, False, detail)],
         error=detail,
         mode="live",

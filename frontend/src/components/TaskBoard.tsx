@@ -23,6 +23,9 @@ export function TaskBoard({ tasks, meta, view, scope, onView, onRefresh, onError
   const [notes, setNotes] = useState("");
   const [draft, setDraft] = useState<{ task: Task; start: string; end: string; invite: boolean } | null>(null);
   const [checkTitle, setCheckTitle] = useState<Record<string, string>>({});
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [editTitle, setEditTitle] = useState("");
+  const [editNotes, setEditNotes] = useState("");
 
   async function run(action: () => Promise<void>) {
     try {
@@ -62,6 +65,51 @@ export function TaskBoard({ tasks, meta, view, scope, onView, onRefresh, onError
                 <h2 className="title">{task.title}</h2>
                 <span className={`badge ${task.domain}`}>{task.domain}</span>
               </div>
+              {editingId === task.id ? (
+                <form
+                  className="form"
+                  onSubmit={(event) => {
+                    event.preventDefault();
+                    void run(async () => {
+                      await api(`/api/tasks/${task.id}`, {
+                        method: "PATCH",
+                        body: JSON.stringify({
+                          expected_version: task.version,
+                          title: editTitle,
+                          notes: editNotes,
+                        }),
+                      });
+                      setEditingId(null);
+                    });
+                  }}
+                >
+                  <label>
+                    <span>Title</span>
+                    <input data-testid="task-edit-title" value={editTitle} onChange={(event) => setEditTitle(event.target.value)} required />
+                  </label>
+                  <label>
+                    <span>Notes</span>
+                    <input data-testid="task-edit-notes" value={editNotes} onChange={(event) => setEditNotes(event.target.value)} />
+                  </label>
+                  <div className="actions">
+                    <button className="primary" type="submit" data-testid="task-edit-save">Save edit</button>
+                    <button className="ghost" type="button" onClick={() => setEditingId(null)}>Cancel</button>
+                  </div>
+                </form>
+              ) : (
+                <button
+                  type="button"
+                  className="tiny"
+                  data-testid="task-edit"
+                  onClick={() => {
+                    setEditingId(task.id);
+                    setEditTitle(task.title);
+                    setEditNotes(task.notes);
+                  }}
+                >
+                  Edit title and notes
+                </button>
+              )}
               <div className="meta">
                 <span>{task.estimate_hours ?? "no"}h est</span>
                 <span>{task.progress.tracked_hours.toFixed(1)}h tracked</span>

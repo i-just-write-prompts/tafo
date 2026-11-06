@@ -106,7 +106,8 @@ h1, h2, h3, p { margin: 0; }
 .meter { height: 6px; background: #efe7da; border-radius: 99px; overflow: hidden; margin-top: 8px; }
 .meter span { display: block; height: 100%; background: var(--pine); }
 .check { display: flex; gap: 8px; align-items: center; font-size: 14px; }
-.form { display: flex; flex-direction: column; gap: 8px; }
+.form { display: flex; flex-direction: column; gap: 8px; align-items: stretch; }
+.form .tiny, .form .ghost, .form .primary { align-self: flex-start; width: auto; }
 label span { display: block; font-size: 12px; color: var(--muted); margin-bottom: 4px; }
 input, select, textarea {
   width: 100%;

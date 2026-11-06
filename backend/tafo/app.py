@@ -128,8 +128,7 @@ def _finish(settings: Settings, adapter: CalendarAdapter, staged: dict) -> dict:
     block = None
     outbox_id = staged.get("outbox_id")
     if outbox_id and staged.get("outbox_status") not in {"simulated", "synced"}:
-        with session(settings.db_path) as conn:
-            outbox = process_outbox(conn, adapter, settings, outbox_id)
+        outbox = process_outbox(settings, adapter, outbox_id)
     elif outbox_id:
         with session(settings.db_path) as conn:
             row = conn.execute("SELECT * FROM outbox_operations WHERE id = ?", (outbox_id,)).fetchone()
@@ -449,8 +448,8 @@ def create_app(settings: Settings | None = None, adapter: CalendarAdapter | None
     @app.post("/api/calendar/outbox/{outbox_id}/retry", tags=["calendar"])
     def post_retry(outbox_id: str, request: Request) -> dict:
         _require_human(request)
+        operation = process_outbox(settings, adapter, outbox_id)
         with session(settings.db_path) as conn:
-            operation = process_outbox(conn, adapter, settings, outbox_id)
             block = get_block(conn, operation["event_key"])
         return {"operation": operation, "block": block}
 
