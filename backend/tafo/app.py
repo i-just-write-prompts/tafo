@@ -298,6 +298,14 @@ def create_app(settings: Settings | None = None, adapter: CalendarAdapter | None
 
     @app.post("/api/tasks/{task_id}/move", tags=["tasks"])
     def post_move(task_id: str, body: TaskMove, request: Request) -> dict:
+        """Reorder one task inside a view.
+
+        Body: direction `up` or `down`, view `all` | `work` | `life`, scope `all` | `today` | `backlog`,
+        and `expected_version` from the task you loaded. Humans only (`X-TAFO-Actor: agent` is 403).
+        200 returns the task. A move that is already at the end of that list changes nothing, but a
+        stale `expected_version` is still 409 `version_conflict` and the order stays. 404 if the task
+        is missing or not in that view.
+        """
         _require_human(request)
         with session(settings.db_path) as conn:
             return move_task(
@@ -312,6 +320,13 @@ def create_app(settings: Settings | None = None, adapter: CalendarAdapter | None
 
     @app.post("/api/tasks/{task_id}/delete", tags=["tasks"])
     def post_delete_task(task_id: str, body: TaskDelete, request: Request) -> dict:
+        """Delete one task and cancel its scheduled calendar blocks.
+
+        Body: `{"expected_version": <int>}` from the task you loaded. Humans only.
+        200 deletes the task, its checklist items, and its timer rows, and processes a cancel
+        outbox row for each scheduled block (a stored Google event is removed by that cancel).
+        409 `version_conflict` leaves the task and its events in place.
+        """
         _require_human(request)
         with session(settings.db_path) as conn:
             cancel_ids = delete_task(
@@ -340,6 +355,11 @@ def create_app(settings: Settings | None = None, adapter: CalendarAdapter | None
 
     @app.delete("/api/subtasks/{subtask_id}", tags=["tasks"])
     def remove_subtask(subtask_id: str, request: Request, expected_version: int) -> dict:
+        """Delete one checklist item.
+
+        Query: `expected_version` from the item you loaded. Humans only.
+        200 removes that item. 409 `version_conflict` leaves it in place.
+        """
         _require_human(request)
         with session(settings.db_path) as conn:
             delete_subtask(conn, subtask_id, expected_version, actor="human")

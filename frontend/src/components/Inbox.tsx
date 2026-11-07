@@ -1,17 +1,24 @@
 import { useState } from "react";
 import { api, formatWhen, payloadOf, reportFailure, toLocalInput } from "../api";
-import type { Meta, Proposal } from "../types";
+import { DeleteControl } from "./DeleteControl";
+import type { Meta, Proposal, Task } from "../types";
 
 interface Props {
   proposals: Proposal[];
+  tasks: Task[];
   meta: Meta;
   onRefresh: () => Promise<void>;
   onError: (message: string) => void;
   onApproved: () => void;
 }
 
-export function Inbox({ proposals, meta, onRefresh, onError, onApproved }: Props) {
+function linkedTaskId(payload: Record<string, unknown>): string | null {
+  return typeof payload.task_id === "string" && payload.task_id ? payload.task_id : null;
+}
+
+export function Inbox({ proposals, tasks, meta, onRefresh, onError, onApproved }: Props) {
   const [acks, setAcks] = useState<Record<string, boolean>>({});
+  const [pendingDelete, setPendingDelete] = useState<string | null>(null);
   const [editing, setEditing] = useState<string | null>(null);
   const [start, setStart] = useState("");
   const [end, setEnd] = useState("");
@@ -36,6 +43,7 @@ export function Inbox({ proposals, meta, onRefresh, onError, onApproved }: Props
       {pending.map((proposal) => {
         const payload = payloadOf(proposal);
         const touches = Boolean(payload.touches_fixed);
+        const linked = tasks.find((task) => task.id === linkedTaskId(payload));
         return (
           <article key={proposal.id} className="slip" data-testid="proposal-card">
             <div className="row">
@@ -176,6 +184,23 @@ export function Inbox({ proposals, meta, onRefresh, onError, onApproved }: Props
               >
                 Reject
               </button>
+              {linked && (
+                <DeleteControl
+                  label={`task ${linked.title}`}
+                  pending={pendingDelete === proposal.id}
+                  onAsk={() => setPendingDelete(proposal.id)}
+                  onCancel={() => setPendingDelete(null)}
+                  onConfirm={() =>
+                    void run(async () => {
+                      await api(`/api/tasks/${linked.id}/delete`, {
+                        method: "POST",
+                        body: JSON.stringify({ expected_version: linked.version }),
+                      });
+                      setPendingDelete(null);
+                    })
+                  }
+                />
+              )}
             </div>
           </article>
         );

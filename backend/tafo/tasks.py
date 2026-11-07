@@ -314,6 +314,16 @@ def move_task(
 ) -> dict:
     if direction not in {"up", "down"}:
         raise Problem(400, "invalid_direction", "Direction must be up or down.")
+    current = conn.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()
+    if current is None:
+        raise Problem(404, "not_found", "Task not found.")
+    if current["version"] != expected_version:
+        raise Problem(
+            409,
+            "version_conflict",
+            "This task changed since you loaded it.",
+            current_version=current["version"],
+        )
     visible = list_tasks(conn, view, scope)
     index = next((i for i, task in enumerate(visible) if task["id"] == task_id), None)
     if index is None:
@@ -323,12 +333,9 @@ def move_task(
         task = get_task(conn, task_id)
         assert task is not None
         return task
-    current = conn.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()
     other = conn.execute("SELECT * FROM tasks WHERE id = ?", (visible[swap_index]["id"],)).fetchone()
-    if current is None or other is None:
+    if other is None:
         raise Problem(404, "not_found", "Task not found.")
-    if current["version"] != expected_version:
-        raise Problem(409, "version_conflict", "This task changed since you loaded it.", current_version=current["version"])
     current_order = int(current["sort_order"])
     other_order = int(other["sort_order"])
     if current_order == other_order:

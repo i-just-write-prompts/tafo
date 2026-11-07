@@ -80,6 +80,18 @@ h1, h2, h3, p { margin: 0; }
 .primary { background: var(--clay); color: white; border-color: var(--clay); }
 .ghost { background: transparent; }
 .tiny { padding: 4px 8px; border-radius: 9px; }
+.tiny.danger { background: var(--bad); color: #f4efe4; border-color: var(--bad); }
+.confirm-delete {
+  display: inline-flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+  padding: 4px 8px;
+  border-radius: 12px;
+  background: var(--pine-deep);
+  color: #f4efe4;
+}
+.confirm-delete .tiny:not(.danger) { background: #f4efe4; color: var(--pine-deep); }
 .hint { color: var(--muted); font-size: 14px; }
 
 .board, .split { display: grid; grid-template-columns: minmax(0, 1.4fr) minmax(280px, 0.8fr); gap: 16px; }

@@ -21,7 +21,7 @@ from tafo.problems import Problem
 from tafo.tasks import create_task, move_task
 from tafo.timeutil import fmt_utc, utc_now
 
-from tests.conftest import add_task
+from tests.conftest import add_task, approve
 from tests.test_calendar_outbox import SimulatedCrash, _live_settings, _proposal
 
 
@@ -713,6 +713,71 @@ def test_move_task_checks_neighbor_version(settings):
             )
     assert caught.value.status == 409
     assert caught.value.code == "version_conflict"
+
+
+def test_stale_noop_move_returns_409(client):
+    task = add_task(client, title="Only sample", on_today=True)
+    stale = client.post(
+        f"/api/tasks/{task['id']}/move",
+        json={
+            "direction": "up",
+            "view": "all",
+            "scope": "today",
+            "expected_version": task["version"] + 4,
+        },
+    )
+    assert stale.status_code == 409
+    assert stale.json()["detail"]["code"] == "version_conflict"
+    current = client.get(f"/api/tasks/{task['id']}").json()
+    assert current["version"] == task["version"]
+    assert current["sort_order"] == task["sort_order"]
+    fresh = client.post(
+        f"/api/tasks/{task['id']}/move",
+        json={"direction": "up", "view": "all", "scope": "today", "expected_version": task["version"]},
+    )
+    assert fresh.status_code == 200, fresh.text
+    assert fresh.json()["version"] == task["version"]
+    assert fresh.json()["sort_order"] == task["sort_order"]
+
+
+def test_delete_task_api_rejects_stale_version_and_cancels_block(client):
+    task = add_task(client, title="Delete sample", domain="work", on_today=True)
+    proposal = client.post(
+        "/api/hermes/proposals",
+        json={
+            "source": "tafo-ui",
+            "kind": "calendar_block",
+            "explanation": "Hold time that must be cancelled with the task.",
+            "payload": {
+                "task_id": task["id"],
+                "domain": "work",
+                "event_key": "evt_delete_api",
+                "starts_at": "2026-11-12T15:00:00Z",
+                "ends_at": "2026-11-12T16:00:00Z",
+            },
+        },
+    ).json()
+    approved = approve(client, proposal)
+    assert approved["block"]["status"] == "scheduled"
+    stale = client.post(
+        f"/api/tasks/{task['id']}/delete",
+        json={"expected_version": task["version"] + 3},
+    )
+    assert stale.status_code == 409
+    assert stale.json()["detail"]["code"] == "version_conflict"
+    assert client.get(f"/api/tasks/{task['id']}").status_code == 200
+    assert client.get("/api/calendar/blocks").json()["blocks"][0]["status"] == "scheduled"
+    deleted = client.post(
+        f"/api/tasks/{task['id']}/delete",
+        json={"expected_version": task["version"]},
+    )
+    assert deleted.status_code == 200, deleted.text
+    assert deleted.json()["deleted"] is True
+    assert deleted.json()["cancellations"]
+    assert client.get(f"/api/tasks/{task['id']}").status_code == 404
+    blocks = client.get("/api/calendar/blocks").json()["blocks"]
+    assert blocks[0]["status"] == "cancelled"
+    assert "not synced" in blocks[0]["honest_label"].lower()
 
 
 def test_snapshot_versions_is_gone():

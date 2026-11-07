@@ -155,7 +155,7 @@ export function App() {
         />
       )}
       {meta && tab === "inbox" && (
-        <Inbox proposals={proposals} meta={meta} onRefresh={refresh} onError={raise} onApproved={() => setTab("calendar")} />
+        <Inbox proposals={proposals} tasks={tasks} meta={meta} onRefresh={refresh} onError={raise} onApproved={() => setTab("calendar")} />
       )}
       {meta && tab === "calendar" && (
         <CalendarPanel

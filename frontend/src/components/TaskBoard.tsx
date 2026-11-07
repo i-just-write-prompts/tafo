@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { api, reportFailure } from "../api";
+import { DeleteControl } from "./DeleteControl";
 import type { Domain, Meta, Status, Suggestion, Task, View } from "../types";
 
 const STATUSES: Status[] = ["todo", "doing", "waiting", "done"];
@@ -26,6 +27,7 @@ export function TaskBoard({ tasks, meta, view, scope, onView, onRefresh, onError
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editTitle, setEditTitle] = useState("");
   const [editNotes, setEditNotes] = useState("");
+  const [pendingDelete, setPendingDelete] = useState<string | null>(null);
 
   async function run(action: () => Promise<void>) {
     try {
@@ -122,21 +124,35 @@ export function TaskBoard({ tasks, meta, view, scope, onView, onRefresh, onError
               {task.notes && <p className="hint">{task.notes}</p>}
               <div className="stack">
                 {task.subtasks.map((item) => (
-                  <label key={item.id} className="check">
-                    <input
-                      type="checkbox"
-                      checked={item.done}
-                      onChange={(event) =>
-                        void run(() =>
-                          api(`/api/subtasks/${item.id}`, {
-                            method: "PATCH",
-                            body: JSON.stringify({ expected_version: item.version, done: event.target.checked }),
-                          }).then(() => undefined),
-                        )
+                  <div key={item.id} className="check">
+                    <label>
+                      <input
+                        type="checkbox"
+                        checked={item.done}
+                        onChange={(event) =>
+                          void run(() =>
+                            api(`/api/subtasks/${item.id}`, {
+                              method: "PATCH",
+                              body: JSON.stringify({ expected_version: item.version, done: event.target.checked }),
+                            }).then(() => undefined),
+                          )
+                        }
+                      />
+                      {item.title}
+                    </label>
+                    <DeleteControl
+                      label={`checklist item ${item.title}`}
+                      pending={pendingDelete === `sub:${item.id}`}
+                      onAsk={() => setPendingDelete(`sub:${item.id}`)}
+                      onCancel={() => setPendingDelete(null)}
+                      onConfirm={() =>
+                        void run(async () => {
+                          await api(`/api/subtasks/${item.id}?expected_version=${item.version}`, { method: "DELETE" });
+                          setPendingDelete(null);
+                        })
                       }
                     />
-                    {item.title}
-                  </label>
+                  </div>
                 ))}
               </div>
               <div className="actions">
@@ -192,6 +208,21 @@ export function TaskBoard({ tasks, meta, view, scope, onView, onRefresh, onError
                     Mark done
                   </button>
                 )}
+                <DeleteControl
+                  label={`task ${task.title}`}
+                  pending={pendingDelete === `task:${task.id}`}
+                  onAsk={() => setPendingDelete(`task:${task.id}`)}
+                  onCancel={() => setPendingDelete(null)}
+                  onConfirm={() =>
+                    void run(async () => {
+                      await api(`/api/tasks/${task.id}/delete`, {
+                        method: "POST",
+                        body: JSON.stringify({ expected_version: task.version }),
+                      });
+                      setPendingDelete(null);
+                    })
+                  }
+                />
               </div>
               <form
                 className="row"

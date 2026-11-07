@@ -6,7 +6,7 @@ TAFO keeps one list across work, home, and personal. **Work / Life / All are vie
 
 ## What you can do
 
-- Add tasks with a domain, status (`todo`, `doing`, `waiting`, `done`), an hour estimate, a due date, notes, and a short checklist. Edit the title and notes afterward; the save sends the version you loaded, and a conflict asks you to reload.
+- Add tasks with a domain, status (`todo`, `doing`, `waiting`, `done`), an hour estimate, a due date, notes, and a short checklist. Edit the title and notes afterward; the save sends the version you loaded, and a conflict asks you to reload. Delete a task or a checklist item from the card after a short confirm. Deleting a task also cancels its scheduled calendar blocks.
 - Split the list into **Today** and **Backlog**, and order each view by hand.
 - Run one timer at a time and see tracked time next to the estimate.
 - Edit and copy weekly bullets generated from tasks completed that week.
@@ -78,6 +78,18 @@ Leave demo mode on until you mean to write a real calendar. Then, only on that m
 4. Install the live extra if you need token refresh: `pip install -e "backend[live]"`.
 
 The adapter creates, updates, and cancels only events it tagged with `tafoEventKey`. Retries look up that key before inserting. Tests use a fake transport and do not call Google.
+
+## Move and delete
+
+These calls are for a person or a cooperative agent on loopback. Send no `X-TAFO-Actor` header, or send `human`. `X-TAFO-Actor: agent` is 403. Every call sends the `expected_version` you last loaded. If that version is stale the response is **409** `version_conflict` (`detail.code`, `detail.message`, and `detail.current_version` when the row still exists). Nothing is reordered or deleted. Load the task or checklist item again and retry with the new version.
+
+| Call | Body or query | 200 | 409 |
+| --- | --- | --- | --- |
+| `POST /api/tasks/{task_id}/move` | `{"direction":"up"\|"down","view":"all"\|"work"\|"life","scope":"all"\|"today"\|"backlog","expected_version":1}` | The task. If it is already first (`up`) or last (`down`) in that view, the order is unchanged. | Stale `expected_version`, including that no-op edge. The order stays. |
+| `POST /api/tasks/{task_id}/delete` | `{"expected_version":1}` | `{"deleted":true,"id":"...","cancellations":[...]}`. The task, its checklist items, and its timer rows are gone. Each scheduled block for that task is cancelled through the outbox, which removes a stored Google event in live mode. | Stale `expected_version`. The task and its events stay. |
+| `DELETE /api/subtasks/{subtask_id}?expected_version=1` | query `expected_version` | `{"deleted":true,"id":"..."}` | Stale `expected_version`. The checklist item stays. |
+
+404 means the task is missing, or a move target is not in that view. The OpenAPI page at `/docs` repeats these descriptions.
 
 ## Hermes inbox
 
