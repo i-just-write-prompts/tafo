@@ -1,7 +1,7 @@
 export type Domain = "work" | "home" | "personal";
 export type Status = "todo" | "doing" | "waiting" | "done";
 export type View = "all" | "work" | "life";
-export type Tab = "today" | "backlog" | "inbox" | "calendar" | "week";
+export type Tab = "plan" | "today" | "backlog" | "inbox" | "calendar" | "week";
 
 export interface Subtask {
   id: string;
@@ -23,6 +23,7 @@ export interface Task {
   sort_order: number;
   on_today: boolean;
   version: number;
+  created_at?: string;
   subtasks: Subtask[];
   tracked_seconds: number;
   progress: {
@@ -45,6 +46,9 @@ export interface Meta {
   outlook_gap: string;
   notices: string[];
   filter_note: string;
+  version?: string;
+  human_edits_auto_approve?: boolean;
+  ui_session_token?: string;
 }
 
 export interface BusyInterval {

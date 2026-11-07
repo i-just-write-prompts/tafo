@@ -6,6 +6,7 @@ TAFO keeps one list across work, home, and personal. **Work / Life / All are vie
 
 ## What you can do
 
+- Open **Plan** (the default tab) on a dark week grid. Unscheduled tasks sit on the left with an age chip. Drag one onto a day to schedule it, then drag or resize the block. A checkbox marks the linked task done. Click a block for the time, duration, and remove confirmation. Your own drags, resizes, and removes are approved immediately; that default is shown in Settings and can be turned off with `TAFO_HUMAN_EDITS_AUTO_APPROVE=0`. Agent proposals stay pending until you approve or deny them on the grid.
 - Add tasks with a domain, status (`todo`, `doing`, `waiting`, `done`), an hour estimate, a due date, notes, and a short checklist. Edit the title and notes afterward; the save sends the version you loaded, and a conflict asks you to reload. Delete a task or a checklist item from the card after a short confirm. Deleting a task also cancels its scheduled calendar blocks.
 - Split the list into **Today** and **Backlog**, and order each view by hand.
 - Run one timer at a time and see tracked time next to the estimate.
@@ -91,16 +92,35 @@ These calls are for a person or a cooperative agent on loopback. Send no `X-TAFO
 
 404 means the task is missing, or a move target is not in that view. The OpenAPI page at `/docs` repeats these descriptions.
 
+## Plan the day
+
+Plan is the human path for the week. It reads tasks, blocks, and proposals that already exist. Every block change is still a proposal, then an approval. There is no separate calendar write API.
+
+The page loads a per-launch session from `GET /api/meta` (`ui_session_token`) and sends it as `X-TAFO-UI-Session` only on `/api/decisions/...`. Approve, deny, and edit from the grid use that header. Quick-add is `POST /api/tasks`. Completing a block is `PATCH /api/tasks/{id}` with `expected_version`. Scheduling, moving, resizing, and removing go through `POST /api/hermes/proposals` (`calendar_block`, `calendar_update`, or `calendar_cancel`, `source_kind: human`) and then the decision route when "My own edits: approved right away" is on.
+
+Keys, with focus outside a text field: `T` today, `W` week, `D` day, `←` `→` move the range (or move a focused block by a day), `↑` `↓` move a focused block 15 minutes, `N` focuses quick-add, `/` focuses find, `A` approves the focused proposal, `X` denies it, `Space` toggles done, `Esc` closes, `Ctrl+Z` undoes the last grid change for 8 seconds.
+
+Run this against a throwaway database. Do not use `start.sh` or `start.ps1`, and do not point `TAFO_DB_PATH` at `data/tafo.sqlite`.
+
+```bash
+export TAFO_TEST_DIR="$(mktemp -d -t tafo-preview-XXXX)"
+TAFO_DATA_DIR="$TAFO_TEST_DIR" TAFO_DB_PATH="$TAFO_TEST_DIR/tafo.sqlite" \
+TAFO_CALENDAR_MODE=demo TAFO_SEED_DEMO=0 TAFO_DISPLAY_TIMEZONE=America/Indianapolis \
+TAFO_HOST=127.0.0.1 TAFO_PORT=8787 .venv/bin/python -m tafo
+```
+
+In another terminal, `cd frontend && npm run dev`, then open `http://127.0.0.1:5173`. The footer `data-rev` is the git revision the page was built from. Demo calendar writes are simulated and are not sent to Google.
+
 ## Hermes inbox
 
-`GET /api/hermes/contract` and the OpenAPI description are the contract.
+`GET /api/hermes/contract` and the OpenAPI description are the contract. They do not describe the local page session.
 
 - Agents `POST /api/hermes/proposals` with `X-TAFO-Actor: agent` and an `idempotency_key`.
-- That call does not change tasks or blocks.
-- A person approves, edits, or rejects at `/api/decisions/{id}/...` with `confirmed: true`.
+- That call does not change tasks or blocks. `calendar_block`, `calendar_update`, `calendar_cancel`, and `task_change` all stay pending.
+- Approve, edit, and reject are only for the local Plan page. An agent header, or any other caller that is not that page session, gets **403** and the proposal stays as it was.
 - The same paths under `/api/hermes/...` return 403.
 - Requests that send `X-TAFO-Actor: agent` cannot patch tasks, run timers, edit the week, approve, or restore a backup.
-- This header is an integration rule for cooperative agents, not authentication. Omitting it, or sending `human`, does not prove who the caller is. Anything that can reach the loopback port can mutate data.
+- This header is an integration rule for cooperative agents, not authentication. Anything that can reach the loopback port can still submit proposals.
 
 Approving a calendar proposal inserts one outbox row. A second approval returns that row. `POST /api/calendar/outbox/{id}/retry` processes it again with the same event key.
 
@@ -125,6 +145,8 @@ Covered: task CRUD and filters, timers, weekly bullets, approval gates, optimist
 
 ## Known gaps
 
+- Plan's Settings list is read-only. Coming-week and work/home rules are not enforced yet. Denying a proposal does not suggest another time.
+- Calendar writes in this build are demo simulations. It has not been tested on Windows, and it has not been tested against a live Google calendar.
 - No accounts, and no manager view. A role header or `?role=manager` does not hide personal tasks.
 - One active timer, up/down ordering rather than drag and drop, no comments, no PERT, no cost model.
 - No background worker. The outbox runs on approve and on retry.

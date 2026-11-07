@@ -41,10 +41,21 @@ export function interpretResponse(
   }
 }
 
+export class UiSession {
+  static token = "";
+
+  static bind(token: string | undefined): void {
+    if (token) UiSession.token = token;
+  }
+}
+
 export async function api<T>(path: string, options: RequestInit = {}): Promise<T> {
   const headers = new Headers(options.headers);
   if (options.body && !headers.has("Content-Type")) {
     headers.set("Content-Type", "application/json");
+  }
+  if (path.startsWith("/api/decisions/") && UiSession.token && !headers.has("X-TAFO-UI-Session")) {
+    headers.set("X-TAFO-UI-Session", UiSession.token);
   }
   let response: Response;
   try {

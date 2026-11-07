@@ -59,6 +59,7 @@ from tafo.tasks import (
 from datetime import timedelta
 
 from tafo.timeutil import parse_utc, utc_now
+from tafo.ui_session import UiSession
 from tafo.week import get_week, regenerate_week, save_week
 
 DESCRIPTION = """
@@ -126,6 +127,13 @@ def _require_confirmed(confirmed: bool) -> None:
         raise Problem(400, "confirmation_required", "Set confirmed true. Nothing was changed.")
 
 
+def _require_decision(request: Request) -> str:
+    """Human decision routes. Agents stay on the existing 403. Everyone else needs the UI session."""
+    actor = _require_human(request)
+    UiSession.accept(request)
+    return actor
+
+
 def _finish(settings: Settings, adapter: CalendarAdapter, staged: dict) -> dict:
     outbox = None
     block = None
@@ -152,6 +160,7 @@ def create_app(settings: Settings | None = None, adapter: CalendarAdapter | None
     settings.validate()
     if adapter is None:
         adapter = build_adapter(settings)
+    ui_session_token = UiSession.mint()
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
@@ -175,6 +184,7 @@ def create_app(settings: Settings | None = None, adapter: CalendarAdapter | None
     )
     app.state.settings = settings
     app.state.adapter = adapter
+    app.state.ui_session_token = ui_session_token
     app.add_middleware(
         CORSMiddleware,
         allow_origins=[
@@ -234,6 +244,8 @@ def create_app(settings: Settings | None = None, adapter: CalendarAdapter | None
             "outlook_gap": OUTLOOK_GAP,
             "notices": NOTICES,
             "filter_note": "Work, Life, and All are view filters. They are not a security boundary.",
+            "human_edits_auto_approve": settings.human_edits_auto_approve,
+            "ui_session_token": ui_session_token,
         }
 
     @app.get("/api/hermes/contract", tags=["hermes"])
@@ -435,7 +447,7 @@ def create_app(settings: Settings | None = None, adapter: CalendarAdapter | None
 
     @app.post("/api/decisions/{proposal_id}/approve", tags=["decisions"])
     def post_approve(proposal_id: str, body: DecisionBody, request: Request) -> dict:
-        _require_human(request)
+        _require_decision(request)
         _require_confirmed(body.confirmed)
         with session(settings.db_path) as conn:
             staged = stage_approval(
@@ -452,7 +464,7 @@ def create_app(settings: Settings | None = None, adapter: CalendarAdapter | None
 
     @app.post("/api/decisions/{proposal_id}/edit", tags=["decisions"])
     def post_edit(proposal_id: str, body: EditBody, request: Request) -> dict:
-        _require_human(request)
+        _require_decision(request)
         _require_confirmed(body.confirmed)
         return edit_proposal(
             settings,
@@ -465,7 +477,7 @@ def create_app(settings: Settings | None = None, adapter: CalendarAdapter | None
 
     @app.post("/api/decisions/{proposal_id}/reject", tags=["decisions"])
     def post_reject(proposal_id: str, body: DecisionBody, request: Request) -> dict:
-        _require_human(request)
+        _require_decision(request)
         _require_confirmed(body.confirmed)
         with session(settings.db_path) as conn:
             return reject_proposal(
