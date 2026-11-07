@@ -1,8 +1,18 @@
+import fastapi.testclient as fastapi_testclient
 import pytest
-from fastapi.testclient import TestClient
 
 from tafo.app import create_app
 from tafo.config import Settings
+
+
+class LoopbackTestClient(fastapi_testclient.TestClient):
+    def __init__(self, *args, **kwargs):
+        kwargs.setdefault("base_url", "http://127.0.0.1")
+        super().__init__(*args, **kwargs)
+
+
+fastapi_testclient.TestClient = LoopbackTestClient
+from fastapi.testclient import TestClient  # noqa: E402
 
 
 @pytest.fixture

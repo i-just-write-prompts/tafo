@@ -16,6 +16,7 @@ from tafo.availability import availability_report
 from tafo.blocks import get_block
 from tafo.calendar_adapter import GENERIC_DESCRIPTION, GENERIC_TITLE, CalendarAdapter
 from tafo.config import Settings
+from tafo.db import read_session, session
 from tafo.outbox import ensure_outbox, outbox_for_proposal
 from tafo.problems import Problem
 from tafo.tasks import clean_title, create_task, get_task, update_task
@@ -188,16 +189,30 @@ def normalize_task_change(conn: sqlite3.Connection, raw: dict, *, editor: str) -
     }
 
 
-def _availability_for(conn, adapter, settings, payload: dict) -> dict:
+def _availability_for(settings: Settings, adapter: CalendarAdapter, payload: dict) -> dict:
     start = parse_utc(payload["starts_at"]) - timedelta(hours=2)
     end = parse_utc(payload["ends_at"]) + timedelta(hours=2)
-    return availability_report(conn, adapter, settings, start, end)
+    return availability_report(settings, adapter, start, end)
+
+
+def _same_stored_body(existing: sqlite3.Row, kind: str, explanation: str, payload: dict, raw_payload: object) -> bool:
+    if existing["kind"] != kind or existing["explanation"] != explanation:
+        return False
+    stored = json.loads(existing["payload_json"])
+    compared = payload
+    if kind != "task_change":
+        raw = raw_payload if isinstance(raw_payload, dict) else {}
+        if not raw.get("event_key") and not raw.get("block_id"):
+            stored = dict(stored)
+            compared = dict(payload)
+            stored.pop("event_key", None)
+            compared.pop("event_key", None)
+    return stored == compared
 
 
 def create_proposal(
-    conn: sqlite3.Connection,
-    adapter: CalendarAdapter,
     settings: Settings,
+    adapter: CalendarAdapter,
     data: dict,
     actor: str,
 ) -> tuple[dict, bool]:
@@ -223,110 +238,148 @@ def create_proposal(
             raise Problem(400, "bad_idempotency_key", "idempotency_key has an unsupported shape.")
     if source_kind == "agent" and not idem:
         raise Problem(400, "idempotency_required", "Agent proposals require idempotency_key so retries do not duplicate work.")
-    if idem:
-        existing = conn.execute("SELECT * FROM proposals WHERE idempotency_key = ?", (idem,)).fetchone()
-        if existing:
-            return serialize_proposal(existing), True
     raw_payload = data.get("payload")
+    with read_session(settings.db_path) as conn:
+        if kind == "task_change":
+            payload = normalize_task_change(conn, raw_payload, editor=source_kind)
+        else:
+            payload = normalize_calendar(conn, raw_payload, editor=source_kind, settings=settings, kind=kind)
+        if idem:
+            existing = conn.execute("SELECT * FROM proposals WHERE idempotency_key = ?", (idem,)).fetchone()
+            if existing is not None:
+                if not _same_stored_body(existing, kind, explanation, payload, raw_payload):
+                    raise Problem(
+                        409,
+                        "idempotency_conflict",
+                        "This idempotency_key was already used with a different body.",
+                    )
+                return serialize_proposal(existing), True
     if kind == "task_change":
-        payload = normalize_task_change(conn, raw_payload, editor=source_kind)
         availability = None
         target_task = payload.get("task_id")
         target_block = None
     else:
-        payload = normalize_calendar(conn, raw_payload, editor=source_kind, settings=settings, kind=kind)
-        availability = _availability_for(conn, adapter, settings, payload)
+        availability = _availability_for(settings, adapter, payload)
         target_task = payload.get("task_id")
         target_block = payload.get("event_key")
     proposal_id = new_id("prp")
     now = utc_now_iso()
-    conn.execute(
-        """
-        INSERT INTO proposals (
-          id, source, source_kind, kind, status, explanation, payload_json, edited_payload_json,
-          target_task_id, target_block_id, availability_json, idempotency_key, version,
-          decision_note, decided_at, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, 'pending', ?, ?, NULL, ?, ?, ?, ?, 1, NULL, NULL, ?, ?)
-        """,
-        (
-            proposal_id,
-            source,
-            source_kind,
-            kind,
-            explanation,
-            json.dumps(payload),
-            target_task,
-            target_block,
-            None if availability is None else json.dumps(availability),
-            idem,
-            now,
-            now,
-        ),
-    )
-    write_audit(
-        conn,
-        actor=f"agent:{source}" if source_kind == "agent" else "human",
-        action="proposal.create",
-        entity_type="proposal",
-        entity_id=proposal_id,
-        detail={"kind": kind},
-    )
-    created = get_proposal(conn, proposal_id)
-    assert created is not None
-    return created, False
+    with session(settings.db_path) as conn:
+        if idem:
+            existing = conn.execute("SELECT * FROM proposals WHERE idempotency_key = ?", (idem,)).fetchone()
+            if existing is not None:
+                if not _same_stored_body(existing, kind, explanation, payload, raw_payload):
+                    raise Problem(
+                        409,
+                        "idempotency_conflict",
+                        "This idempotency_key was already used with a different body.",
+                    )
+                return serialize_proposal(existing), True
+        try:
+            conn.execute(
+                """
+                INSERT INTO proposals (
+                  id, source, source_kind, kind, status, explanation, payload_json, edited_payload_json,
+                  target_task_id, target_block_id, availability_json, idempotency_key, version,
+                  decision_note, decided_at, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, 'pending', ?, ?, NULL, ?, ?, ?, ?, 1, NULL, NULL, ?, ?)
+                """,
+                (
+                    proposal_id,
+                    source,
+                    source_kind,
+                    kind,
+                    explanation,
+                    json.dumps(payload),
+                    target_task,
+                    target_block,
+                    None if availability is None else json.dumps(availability),
+                    idem,
+                    now,
+                    now,
+                ),
+            )
+        except sqlite3.IntegrityError as exc:
+            existing = None
+            if idem:
+                existing = conn.execute("SELECT * FROM proposals WHERE idempotency_key = ?", (idem,)).fetchone()
+            if existing is not None and _same_stored_body(existing, kind, explanation, payload, raw_payload):
+                return serialize_proposal(existing), True
+            if existing is not None:
+                raise Problem(
+                    409,
+                    "idempotency_conflict",
+                    "This idempotency_key was already used with a different body.",
+                ) from exc
+            raise
+        write_audit(
+            conn,
+            actor=f"agent:{source}" if source_kind == "agent" else "human",
+            action="proposal.create",
+            entity_type="proposal",
+            entity_id=proposal_id,
+            detail={"kind": kind},
+        )
+        created = get_proposal(conn, proposal_id)
+        assert created is not None
+        return created, False
 
 
 def edit_proposal(
-    conn: sqlite3.Connection,
-    adapter: CalendarAdapter,
     settings: Settings,
+    adapter: CalendarAdapter,
     proposal_id: str,
     *,
     expected_version: int,
     payload: dict,
     actor: str,
 ) -> dict:
-    row = conn.execute("SELECT * FROM proposals WHERE id = ?", (proposal_id,)).fetchone()
-    if row is None:
-        raise Problem(404, "not_found", "Proposal not found.")
-    if row["status"] != "pending":
-        raise Problem(409, "not_pending", "Only a pending proposal can be edited.")
-    if row["version"] != expected_version:
-        raise Problem(409, "version_conflict", "This proposal changed.", current_version=row["version"])
-    if row["kind"] == "task_change":
-        normalized = normalize_task_change(conn, payload, editor="human")
+    with read_session(settings.db_path) as conn:
+        row = conn.execute("SELECT * FROM proposals WHERE id = ?", (proposal_id,)).fetchone()
+        if row is None:
+            raise Problem(404, "not_found", "Proposal not found.")
+        if row["status"] != "pending":
+            raise Problem(409, "not_pending", "Only a pending proposal can be edited.")
+        if row["version"] != expected_version:
+            raise Problem(409, "version_conflict", "This proposal changed.", current_version=row["version"])
+        kind = row["kind"]
+        if kind == "task_change":
+            normalized = normalize_task_change(conn, payload, editor="human")
+        else:
+            normalized = normalize_calendar(conn, payload, editor="human", settings=settings, kind=kind)
+    if kind == "task_change":
         availability = None
         target_task = normalized.get("task_id")
         target_block = None
     else:
-        normalized = normalize_calendar(conn, payload, editor="human", settings=settings, kind=row["kind"])
-        availability = _availability_for(conn, adapter, settings, normalized)
+        availability = _availability_for(settings, adapter, normalized)
         target_task = normalized.get("task_id")
         target_block = normalized.get("event_key")
     now = utc_now_iso()
-    cursor = conn.execute(
-        """
-        UPDATE proposals
-        SET edited_payload_json = ?, availability_json = ?, target_task_id = ?, target_block_id = ?,
-            version = version + 1, updated_at = ?
-        WHERE id = ? AND version = ? AND status = 'pending'
-        """,
-        (
-            json.dumps(normalized),
-            None if availability is None else json.dumps(availability),
-            target_task,
-            target_block,
-            now,
-            proposal_id,
-            expected_version,
-        ),
-    )
-    if cursor.rowcount != 1:
-        raise Problem(409, "version_conflict", "This proposal changed.")
-    write_audit(conn, actor=actor, action="proposal.edit", entity_type="proposal", entity_id=proposal_id, detail={})
-    updated = get_proposal(conn, proposal_id)
-    assert updated is not None
-    return updated
+    with session(settings.db_path) as conn:
+        cursor = conn.execute(
+            """
+            UPDATE proposals
+            SET edited_payload_json = ?, availability_json = ?, target_task_id = ?, target_block_id = ?,
+                version = version + 1, updated_at = ?
+            WHERE id = ? AND version = ? AND status = 'pending'
+            """,
+            (
+                json.dumps(normalized),
+                None if availability is None else json.dumps(availability),
+                target_task,
+                target_block,
+                now,
+                proposal_id,
+                expected_version,
+            ),
+        )
+        if cursor.rowcount != 1:
+            raise Problem(409, "version_conflict", "This proposal changed.")
+        write_audit(conn, actor=actor, action="proposal.edit", entity_type="proposal", entity_id=proposal_id, detail={})
+        updated = get_proposal(conn, proposal_id)
+        assert updated is not None
+        return updated
 
 
 def reject_proposal(

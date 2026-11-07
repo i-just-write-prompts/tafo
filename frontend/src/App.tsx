@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { api, formatWhen } from "./api";
+import { OFFLINE_MESSAGE, api, formatWhen } from "./api";
 import { CalendarPanel } from "./components/CalendarPanel";
 import { Inbox } from "./components/Inbox";
 import { TaskBoard } from "./components/TaskBoard";
@@ -42,34 +42,47 @@ export function App() {
   const [active, setActive] = useState<TimerSession | null>(null);
   const [audit, setAudit] = useState<AuditEntry[]>([]);
   const [error, setError] = useState<string | null>(null);
+  const [offline, setOffline] = useState(false);
   const [now, setNow] = useState(Date.now());
+
+  function raise(message: string) {
+    setError(message);
+    setOffline(message === OFFLINE_MESSAGE);
+  }
 
   async function refresh() {
     const scope = tab === "backlog" ? "backlog" : tab === "today" ? "today" : "all";
-    const [nextMeta, taskBody, proposalBody, timerBody, blockBody, outboxBody, weekBody, auditBody, busyBody] = await Promise.all([
-      api<Meta>("/api/meta"),
-      api<{ tasks: Task[] }>(`/api/tasks?view=${view}&scope=${scope}`),
-      api<{ proposals: Proposal[] }>("/api/hermes/proposals"),
-      api<{ active: TimerSession | null }>("/api/timers/active"),
-      api<{ blocks: CalendarBlock[] }>("/api/calendar/blocks"),
-      api<{ operations: OutboxOperation[] }>("/api/calendar/outbox"),
-      api<WeekSummary>("/api/week"),
-      api<{ entries: AuditEntry[] }>("/api/audit?limit=8"),
-      api<Availability>("/api/calendar/availability"),
-    ]);
-    setMeta(nextMeta);
-    setTasks(taskBody.tasks);
-    setProposals(proposalBody.proposals);
-    setActive(timerBody.active);
-    setBlocks(blockBody.blocks);
-    setOperations(outboxBody.operations);
-    setWeek(weekBody);
-    setAudit(auditBody.entries);
-    setAvailability(busyBody);
+    try {
+      const [nextMeta, taskBody, proposalBody, timerBody, blockBody, outboxBody, weekBody, auditBody, busyBody] = await Promise.all([
+        api<Meta>("/api/meta"),
+        api<{ tasks: Task[] }>(`/api/tasks?view=${view}&scope=${scope}`),
+        api<{ proposals: Proposal[] }>("/api/hermes/proposals"),
+        api<{ active: TimerSession | null }>("/api/timers/active"),
+        api<{ blocks: CalendarBlock[] }>("/api/calendar/blocks"),
+        api<{ operations: OutboxOperation[] }>("/api/calendar/outbox"),
+        api<WeekSummary>("/api/week"),
+        api<{ entries: AuditEntry[] }>("/api/audit?limit=8"),
+        api<Availability>("/api/calendar/availability"),
+      ]);
+      setMeta(nextMeta);
+      setTasks(taskBody.tasks);
+      setProposals(proposalBody.proposals);
+      setActive(timerBody.active);
+      setBlocks(blockBody.blocks);
+      setOperations(outboxBody.operations);
+      setWeek(weekBody);
+      setAudit(auditBody.entries);
+      setAvailability(busyBody);
+      setError(null);
+      setOffline(false);
+    } catch (reason) {
+      raise(reason instanceof Error ? reason.message : "Could not load TAFO");
+      throw reason;
+    }
   }
 
   useEffect(() => {
-    refresh().catch((reason: unknown) => setError(reason instanceof Error ? reason.message : "Could not load TAFO"));
+    refresh().catch(() => undefined);
   }, [tab, view]);
 
   useEffect(() => {
@@ -106,7 +119,16 @@ export function App() {
           {meta.outlook_gap}
         </p>
       )}
-      {error && <p className="error-banner" role="alert">{error}</p>}
+      {error && (
+        <div className="error-banner" role="alert" data-testid={offline ? "offline-banner" : "app-error"}>
+          <p>{error}</p>
+          {offline && (
+            <button type="button" data-testid="retry-load" onClick={() => { refresh().catch(() => undefined); }}>
+              Retry
+            </button>
+          )}
+        </div>
+      )}
       <nav className="tabs">
         {([
           ["today", "Today"],
@@ -115,7 +137,7 @@ export function App() {
           ["calendar", "Calendar"],
           ["week", "Week"],
         ] as const).map(([id, label]) => (
-          <button key={id} className={tab === id ? "tab active" : "tab"} type="button" onClick={() => { setError(null); setTab(id); }}>
+          <button key={id} className={tab === id ? "tab active" : "tab"} type="button" onClick={() => { if (id === tab) { refresh().catch(() => undefined); return; } setTab(id); }}>
             {label}
           </button>
         ))}
@@ -128,12 +150,12 @@ export function App() {
           scope={tab}
           onView={setView}
           onRefresh={refresh}
-          onError={setError}
+          onError={raise}
           onProposed={() => setTab("inbox")}
         />
       )}
       {meta && tab === "inbox" && (
-        <Inbox proposals={proposals} meta={meta} onRefresh={refresh} onError={setError} onApproved={() => setTab("calendar")} />
+        <Inbox proposals={proposals} meta={meta} onRefresh={refresh} onError={raise} onApproved={() => setTab("calendar")} />
       )}
       {meta && tab === "calendar" && (
         <CalendarPanel
@@ -143,10 +165,10 @@ export function App() {
           availability={availability}
           audit={audit}
           onRefresh={refresh}
-          onError={setError}
+          onError={raise}
         />
       )}
-      {tab === "week" && <WeekPanel week={week} onRefresh={refresh} onError={setError} />}
+      {tab === "week" && <WeekPanel week={week} onRefresh={refresh} onError={raise} />}
       {meta && (
         <footer className="footer">
           <p>{meta.notices[0]} {meta.notices[1]}</p>
@@ -169,7 +191,7 @@ export function App() {
             onClick={() => {
               api(`/api/tasks/${active.task_id}/timer/stop`, { method: "POST" })
                 .then(() => refresh())
-                .catch((reason: unknown) => setError(reason instanceof Error ? reason.message : "Could not stop"));
+                .catch((reason: unknown) => raise(reason instanceof Error ? reason.message : "Could not stop"));
             }}
           >
             Stop timer

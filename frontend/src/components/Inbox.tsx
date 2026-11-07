@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { api, formatWhen, payloadOf, toLocalInput } from "../api";
+import { api, formatWhen, payloadOf, reportFailure, toLocalInput } from "../api";
 import type { Meta, Proposal } from "../types";
 
 interface Props {
@@ -24,7 +24,7 @@ export function Inbox({ proposals, meta, onRefresh, onError, onApproved }: Props
       await onRefresh();
       after?.();
     } catch (error) {
-      onError(error instanceof Error ? error.message : "Something went wrong");
+      await reportFailure(error, onRefresh, onError);
     }
   }
 

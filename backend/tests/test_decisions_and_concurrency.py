@@ -39,7 +39,11 @@ def test_agent_proposal_does_not_apply_until_a_person_approves(client):
             "kind": "task_change",
             "explanation": "Suggest moving the sample outline onto Today.",
             "idempotency_key": "agent-req-outline-1",
-            "payload": {"op": "update", "task_id": task["id"], "changes": {"on_today": True}},
+            "payload": {
+                "op": "update",
+                "task_id": task["id"],
+                "changes": {"on_today": True, "title": "Should not apply yet"},
+            },
         },
     )
     assert replay.status_code == 200, replay.text

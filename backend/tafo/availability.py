@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
-import sqlite3
 from datetime import datetime, timedelta, timezone
 
-from tafo.blocks import blocks_overlapping, list_blocks
+from tafo.blocks import blocks_overlapping
 from tafo.calendar_adapter import OUTLOOK_GAP, BusyInterval, CalendarAdapter
 from tafo.config import Settings
+from tafo.db import read_session
 from tafo.timeutil import fmt_utc, overlaps, parse_utc, to_local_naive, utc_now
 
 
@@ -30,13 +30,14 @@ def dedupe_busy(raw: list[BusyInterval], local_blocks: list[dict]) -> dict[str, 
 
 
 def availability_report(
-    conn: sqlite3.Connection,
-    adapter: CalendarAdapter,
     settings: Settings,
+    adapter: CalendarAdapter,
     start: datetime,
     end: datetime,
 ) -> dict:
-    local = blocks_overlapping(conn, start, end)
+    """Load local blocks, release the connection, then read the remote calendar."""
+    with read_session(settings.db_path) as conn:
+        local = blocks_overlapping(conn, start, end)
     read_error = None
     try:
         raw = adapter.read_busy(start, end)
@@ -80,9 +81,8 @@ def _blockers(report: dict) -> list[tuple[datetime, datetime]]:
 
 
 def suggest_slot(
-    conn: sqlite3.Connection,
-    adapter: CalendarAdapter,
     settings: Settings,
+    adapter: CalendarAdapter,
     *,
     duration_minutes: int,
 ) -> dict:
@@ -93,7 +93,7 @@ def suggest_slot(
     tz_name = settings.display_timezone
     now_utc = utc_now()
     search_end = now_utc + timedelta(days=7)
-    report = availability_report(conn, adapter, settings, now_utc, search_end)
+    report = availability_report(settings, adapter, now_utc, search_end)
     blockers = _blockers(report)
     duration = timedelta(minutes=duration_minutes)
     from zoneinfo import ZoneInfo
@@ -145,7 +145,3 @@ def suggest_slot(
         "availability": report,
         "outlook_gap": OUTLOOK_GAP,
     }
-
-
-def snapshot_versions(conn: sqlite3.Connection) -> list[dict]:
-    return [{"id": row["id"], "version": row["version"], "starts_at": row["starts_at"]} for row in list_blocks(conn)]

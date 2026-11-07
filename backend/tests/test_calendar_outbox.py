@@ -36,8 +36,10 @@ class ScriptTransport:
         if method == "GET":
             return {"items": list(self.events.values())}
         if method == "POST" and url.endswith("/events"):
+            body = dict(json_body or {})
+            body.pop("id", None)
             event_id = f"g{len(self.events) + 1}"
-            event = {"id": event_id, **(json_body or {})}
+            event = {"id": event_id, **body}
             self.events[event_id] = event
             return event
         if method == "POST" and url.endswith("/freeBusy"):
@@ -469,8 +471,10 @@ class LookupLossTransport:
             return {"items": list(self.events.values())}
         if method == "POST" and url.endswith("/events"):
             self.posts += 1
+            body = dict(json_body or {})
+            body.pop("id", None)
             event_id = f"g{self.posts}"
-            event = {"id": event_id, **(json_body or {})}
+            event = {"id": event_id, **body}
             self.events[event_id] = event
             return event
         if method == "POST" and url.endswith("/freeBusy"):

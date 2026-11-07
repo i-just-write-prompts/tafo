@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { api } from "../api";
+import { api, reportFailure } from "../api";
 import type { Domain, Meta, Status, Suggestion, Task, View } from "../types";
 
 const STATUSES: Status[] = ["todo", "doing", "waiting", "done"];
@@ -32,7 +32,7 @@ export function TaskBoard({ tasks, meta, view, scope, onView, onRefresh, onError
       await action();
       await onRefresh();
     } catch (error) {
-      onError(error instanceof Error ? error.message : "Something went wrong");
+      await reportFailure(error, onRefresh, onError);
     }
   }
 

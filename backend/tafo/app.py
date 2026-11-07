@@ -14,8 +14,8 @@ from tafo.availability import availability_report, suggest_slot
 from tafo.backup import export_snapshot, restore_snapshot, write_backup_file
 from tafo.blocks import get_block, list_blocks
 from tafo.calendar_adapter import OUTLOOK_GAP, CalendarAdapter, build_adapter
-from tafo.config import Settings
-from tafo.db import connect, session
+from tafo.config import Settings, host_is_loopback
+from tafo.db import connect, read_session, session
 from tafo.decisions import (
     create_proposal,
     edit_proposal,
@@ -85,18 +85,21 @@ NOTICES = [
 
 def init_db(settings: Settings, adapter: CalendarAdapter) -> None:
     conn = connect(settings.db_path)
+    pending: list[dict] = []
     try:
         apply_migrations(conn)
         if settings.seed_demo:
             conn.execute("BEGIN IMMEDIATE")
             try:
-                seed_if_empty(conn, settings, adapter)
+                pending = seed_if_empty(conn, settings, adapter)
                 conn.execute("COMMIT")
             except Exception:
                 conn.execute("ROLLBACK")
                 raise
     finally:
         conn.close()
+    for body in pending:
+        create_proposal(settings, adapter, body, "human")
 
 
 def _actor(request: Request) -> str:
@@ -183,6 +186,20 @@ def create_app(settings: Settings | None = None, adapter: CalendarAdapter | None
         allow_methods=["*"],
         allow_headers=["*"],
     )
+
+    @app.middleware("http")
+    async def require_loopback_host(request: Request, call_next):
+        if not settings.allow_lan and not host_is_loopback(request.headers.get("host")):
+            return JSONResponse(
+                status_code=400,
+                content={
+                    "detail": {
+                        "code": "bad_host",
+                        "message": "TAFO only accepts a loopback Host header (127.0.0.1, localhost, or ::1).",
+                    }
+                },
+            )
+        return await call_next(request)
 
     @app.exception_handler(Problem)
     async def problem_handler(_request: Request, exc: Problem) -> JSONResponse:
@@ -297,8 +314,15 @@ def create_app(settings: Settings | None = None, adapter: CalendarAdapter | None
     def post_delete_task(task_id: str, body: TaskDelete, request: Request) -> dict:
         _require_human(request)
         with session(settings.db_path) as conn:
-            delete_task(conn, task_id, body.expected_version, actor="human")
-        return {"deleted": True, "id": task_id}
+            cancel_ids = delete_task(
+                conn,
+                task_id,
+                body.expected_version,
+                actor="human",
+                calendar_mode=settings.calendar_mode,
+            )
+        cancellations = [process_outbox(settings, adapter, outbox_id) for outbox_id in cancel_ids]
+        return {"deleted": True, "id": task_id, "cancellations": cancellations}
 
     @app.post("/api/tasks/{task_id}/subtasks", status_code=201, tags=["tasks"])
     def post_subtask(task_id: str, body: SubtaskCreate, request: Request) -> dict:
@@ -315,10 +339,10 @@ def create_app(settings: Settings | None = None, adapter: CalendarAdapter | None
             return update_subtask(conn, subtask_id, data, expected, actor="human")
 
     @app.delete("/api/subtasks/{subtask_id}", tags=["tasks"])
-    def remove_subtask(subtask_id: str, request: Request) -> dict:
+    def remove_subtask(subtask_id: str, request: Request, expected_version: int) -> dict:
         _require_human(request)
         with session(settings.db_path) as conn:
-            delete_subtask(conn, subtask_id, actor="human")
+            delete_subtask(conn, subtask_id, expected_version, actor="human")
         return {"deleted": True, "id": subtask_id}
 
     @app.get("/api/timers/active", tags=["timers"])
@@ -358,8 +382,7 @@ def create_app(settings: Settings | None = None, adapter: CalendarAdapter | None
     @app.post("/api/hermes/proposals", tags=["hermes"])
     def post_proposal(body: ProposalCreate, request: Request):
         actor = _actor(request)
-        with session(settings.db_path) as conn:
-            proposal, replay = create_proposal(conn, adapter, settings, body.model_dump(), actor)
+        proposal, replay = create_proposal(settings, adapter, body.model_dump(), actor)
         return JSONResponse(proposal, status_code=200 if replay else 201)
 
     @app.get("/api/hermes/proposals", tags=["hermes"])
@@ -411,16 +434,14 @@ def create_app(settings: Settings | None = None, adapter: CalendarAdapter | None
     def post_edit(proposal_id: str, body: EditBody, request: Request) -> dict:
         _require_human(request)
         _require_confirmed(body.confirmed)
-        with session(settings.db_path) as conn:
-            return edit_proposal(
-                conn,
-                adapter,
-                settings,
-                proposal_id,
-                expected_version=body.expected_version,
-                payload=body.payload,
-                actor="human",
-            )
+        return edit_proposal(
+            settings,
+            adapter,
+            proposal_id,
+            expected_version=body.expected_version,
+            payload=body.payload,
+            actor="human",
+        )
 
     @app.post("/api/decisions/{proposal_id}/reject", tags=["decisions"])
     def post_reject(proposal_id: str, body: DecisionBody, request: Request) -> dict:
@@ -457,21 +478,20 @@ def create_app(settings: Settings | None = None, adapter: CalendarAdapter | None
     def get_availability(start: str | None = None, end: str | None = None) -> dict:
         start_at = parse_utc(start) if start else utc_now()
         end_at = parse_utc(end) if end else utc_now() + timedelta(days=2)
-        with session(settings.db_path) as conn:
-            return availability_report(conn, adapter, settings, start_at, end_at)
+        return availability_report(settings, adapter, start_at, end_at)
 
     @app.get("/api/calendar/suggestion", tags=["calendar"])
     def get_suggestion(task_id: str | None = None, duration_minutes: int | None = None) -> dict:
         minutes = duration_minutes
-        with session(settings.db_path) as conn:
-            if minutes is None and task_id:
+        if minutes is None and task_id:
+            with read_session(settings.db_path) as conn:
                 task = get_task(conn, task_id)
                 if task and task["estimate_hours"]:
                     minutes = int(round(float(task["estimate_hours"]) * 60))
-            if minutes is None:
-                minutes = 60
-            minutes = min(12 * 60, max(15, minutes))
-            return suggest_slot(conn, adapter, settings, duration_minutes=minutes)
+        if minutes is None:
+            minutes = 60
+        minutes = min(12 * 60, max(15, minutes))
+        return suggest_slot(settings, adapter, duration_minutes=minutes)
 
     @app.get("/api/audit", tags=["audit"])
     def get_audit(limit: int = 30) -> dict:

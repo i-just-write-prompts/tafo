@@ -8,7 +8,6 @@ from zoneinfo import ZoneInfo
 
 from tafo.calendar_adapter import DEMO_HONEST_LABEL, CalendarAdapter
 from tafo.config import Settings
-from tafo.decisions import create_proposal
 from tafo.demo_schedule import DEMO_MIRROR_KEY, demo_fixed_span, demo_mirror_span
 from tafo.tasks import add_subtask, create_task, update_subtask
 from tafo.timeutil import fmt_utc, utc_now, utc_now_iso
@@ -50,10 +49,12 @@ def _insert_block(
     )
 
 
-def seed_if_empty(conn: sqlite3.Connection, settings: Settings, adapter: CalendarAdapter) -> None:
+def seed_if_empty(conn: sqlite3.Connection, settings: Settings, adapter: CalendarAdapter) -> list[dict]:
+    """Insert fictional rows. Returns proposal bodies to submit after this transaction commits."""
+    del adapter
     count = conn.execute("SELECT COUNT(*) AS n FROM tasks").fetchone()["n"]
     if count:
-        return
+        return []
     today = utc_now().astimezone(ZoneInfo(settings.display_timezone)).date()
 
     def due(days: int) -> str:
@@ -170,10 +171,7 @@ def seed_if_empty(conn: sqlite3.Connection, settings: Settings, adapter: Calenda
     )
     proposal_start = fixed_start + timedelta(hours=4)
     proposal_end = proposal_start + timedelta(minutes=90)
-    create_proposal(
-        conn,
-        adapter,
-        settings,
+    return [
         {
             "source": "tafo-sample",
             "source_kind": "human",
@@ -191,12 +189,6 @@ def seed_if_empty(conn: sqlite3.Connection, settings: Settings, adapter: Calenda
                 "invite_work_email": False,
             },
         },
-        "human",
-    )
-    create_proposal(
-        conn,
-        adapter,
-        settings,
         {
             "source": "tafo-sample",
             "source_kind": "human",
@@ -209,5 +201,4 @@ def seed_if_empty(conn: sqlite3.Connection, settings: Settings, adapter: Calenda
                 "changes": {"on_today": True},
             },
         },
-        "human",
-    )
+    ]

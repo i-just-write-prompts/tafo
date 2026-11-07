@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { api } from "../api";
+import { api, reportFailure } from "../api";
 import type { WeekSummary } from "../types";
 
 interface Props {
@@ -30,7 +30,7 @@ export function WeekPanel({ week, onRefresh, onError }: Props) {
           body: JSON.stringify({ week_start: week.week_start, expected_version: week.version, bullets }),
         })
           .then(() => onRefresh())
-          .catch((error: unknown) => onError(error instanceof Error ? error.message : "Could not save"));
+          .catch((error: unknown) => { void reportFailure(error, onRefresh, onError); });
       }}
     >
       <h2>Week of {week.week_start}</h2>
@@ -47,7 +47,7 @@ export function WeekPanel({ week, onRefresh, onError }: Props) {
               body: JSON.stringify({ week_start: week.week_start, expected_version: week.version }),
             })
               .then(() => onRefresh())
-              .catch((error: unknown) => onError(error instanceof Error ? error.message : "Could not regenerate"));
+              .catch((error: unknown) => { void reportFailure(error, onRefresh, onError); });
           }}
         >
           Regenerate from completed tasks

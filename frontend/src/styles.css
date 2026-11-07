@@ -66,6 +66,7 @@ h1, h2, h3, p { margin: 0; }
 }
 .gap-banner { background: #fff1e6; border: 1px solid #f0d0bc; }
 .error-banner { background: #fdeceb; border: 1px solid #f0c2bd; color: var(--bad); }
+.error-banner button { margin-top: 8px; }
 
 .tabs, .filters { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
 .tabs { margin: 8px 0 14px; }

@@ -6,12 +6,16 @@ Live mode talks to the Google Calendar API only through an explicit transport.
 
 from __future__ import annotations
 
+import hashlib
 import json
+import os
+import threading
 import urllib.error
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+from pathlib import Path
 from typing import Protocol
 
 from tafo.config import Settings
@@ -37,10 +41,11 @@ class CalendarNotConfigured(Exception):
 
 
 class TransportError(Exception):
-    def __init__(self, status: int, body: str) -> None:
+    def __init__(self, status: int, body: str, retry_after: float | None = None) -> None:
         super().__init__(body[:500])
         self.status = status
         self.body = body[:500]
+        self.retry_after = retry_after
 
 
 @dataclass
@@ -91,6 +96,7 @@ class AdapterResult:
     steps: list[StepRecord]
     error: str | None = None
     mode: str = "demo"
+    retry_after: float | None = None
 
     def as_dict(self) -> dict:
         return {
@@ -102,6 +108,7 @@ class AdapterResult:
             "steps": [step.as_dict() for step in self.steps],
             "error": self.error,
             "mode": self.mode,
+            "retry_after": self.retry_after,
         }
 
 
@@ -244,7 +251,8 @@ class UrllibTransport:
                 raw = response.read().decode("utf-8")
         except urllib.error.HTTPError as exc:
             body = exc.read().decode("utf-8", errors="replace")
-            raise TransportError(exc.code, body) from exc
+            header = exc.headers.get("Retry-After") if exc.headers else None
+            raise TransportError(exc.code, body, retry_after=parse_retry_after(header)) from exc
         if not raw:
             return {}
         return json.loads(raw)
@@ -257,9 +265,10 @@ class AuthorizedUserTokenProvider:
         self.path = path
 
     def access_token(self) -> str:
-        file_path = __import__("pathlib").Path(self.path)
+        file_path = Path(self.path)
         if not file_path.is_file():
             raise CalendarNotConfigured("Google credentials file was not found. No calendar request was sent.")
+        restrict_private_file(file_path)
         try:
             from google.auth.transport.requests import Request
             from google.oauth2.credentials import Credentials
@@ -271,7 +280,7 @@ class AuthorizedUserTokenProvider:
         if not creds.valid:
             if creds.expired and creds.refresh_token:
                 creds.refresh(Request())
-                file_path.write_text(creds.to_json())
+                write_private_text(file_path, creds.to_json())
             else:
                 raise CalendarNotConfigured("Google credentials are not usable. No calendar request was sent.")
         if not creds.token:
@@ -283,6 +292,16 @@ class GoogleCalendarAdapter:
     """Google Calendar is the write authority for app-owned blocks."""
 
     mode = "live"
+    _event_locks_guard = threading.Lock()
+    _event_locks: dict[str, threading.Lock] = {}
+
+    def _event_lock(self, event_key: str) -> threading.Lock:
+        with GoogleCalendarAdapter._event_locks_guard:
+            lock = GoogleCalendarAdapter._event_locks.get(event_key)
+            if lock is None:
+                lock = threading.Lock()
+                GoogleCalendarAdapter._event_locks[event_key] = lock
+            return lock
 
     def __init__(
         self,
@@ -404,10 +423,12 @@ class GoogleCalendarAdapter:
         return intervals
 
     def create_block(self, event_key: str, payload: dict, known_google_id: str | None = None) -> AdapterResult:
-        return self._upsert(event_key, payload, known_google_id)
+        with self._event_lock(event_key):
+            return self._upsert(event_key, payload, known_google_id)
 
     def update_block(self, event_key: str, payload: dict, known_google_id: str | None = None) -> AdapterResult:
-        return self._upsert(event_key, payload, known_google_id)
+        with self._event_lock(event_key):
+            return self._upsert(event_key, payload, known_google_id)
 
     def cancel_block(self, event_key: str, payload: dict, known_google_id: str | None = None) -> AdapterResult:
         steps: list[StepRecord] = []
@@ -416,7 +437,8 @@ class GoogleCalendarAdapter:
             headers = self._headers()
             existing = self._find(event_key, headers)
         except (TransportError, CalendarNotConfigured) as exc:
-            return _live_failure("lookup_event", str(exc), known_google_id)
+            retry_after = exc.retry_after if isinstance(exc, TransportError) else None
+            return _live_failure("lookup_event", str(exc), known_google_id, retry_after=retry_after)
         event_id = (existing or {}).get("id") or known_google_id
         if not event_id:
             steps.append(StepRecord("cancel_event", True, "No Google event exists for this key. Nothing to delete."))
@@ -459,6 +481,7 @@ class GoogleCalendarAdapter:
                 steps=steps,
                 error=exc.body,
                 mode="live",
+                retry_after=exc.retry_after,
             )
         steps.append(StepRecord("cancel_event", True, "Cancelled the app-owned Google event.", event_id))
         return AdapterResult(
@@ -477,57 +500,59 @@ class GoogleCalendarAdapter:
             headers = self._headers()
             existing = self._find(event_key, headers)
         except (TransportError, CalendarNotConfigured) as exc:
-            return _live_failure("lookup_event", str(exc), known_google_id)
+            retry_after = exc.retry_after if isinstance(exc, TransportError) else None
+            return _live_failure("lookup_event", str(exc), known_google_id, retry_after=retry_after)
         body = self._body(event_key, payload)
-        # An empty lookup must update the id we already stored, not insert another event.
+        stable_id = deterministic_event_id(event_key)
+        # Prefer a located event, then the id we already stored. An empty lookup
+        # still checks the deterministic id so a crash after insert does not POST again.
         event_id = (existing or {}).get("id") or known_google_id
-        try:
-            if event_id:
-                self.transport.request(
-                    "PATCH",
-                    f"{self._events_url()}/{urllib.parse.quote(event_id, safe='')}",
-                    params={"sendUpdates": "none"},
-                    json_body=body,
-                    headers=headers,
-                )
+        if not event_id:
+            found, failure = self._fetch_stable(stable_id, headers)
+            if failure is not None:
+                return failure
+            event_id = found
+        if event_id:
+            patched, missing = self._patch_event(event_id, body, headers)
+            if patched:
                 steps.append(StepRecord("upsert_event", True, "Updated the existing app-owned event. No duplicate insert.", event_id))
-            else:
-                created = self.transport.request(
-                    "POST",
-                    self._events_url(),
-                    params={"sendUpdates": "none"},
-                    json_body=body,
-                    headers=headers,
-                )
-                event_id = created.get("id")
-                if not event_id:
-                    return AdapterResult(
-                        ok=False,
-                        status="failed",
-                        sync_state="not_synced",
-                        google_event_id=None,
-                        honest_label="Not synced. Google did not return an event id. No success is claimed.",
-                        steps=steps + [StepRecord("upsert_event", False, "Missing event id.")],
-                        error="missing_event_id",
-                        mode="live",
-                    )
+            elif missing is not None and missing.status in {404, 410}:
+                steps.append(StepRecord("upsert_event", False, "Stored event id was gone. One replacement will be created.", event_id))
+                event_id = None
+            elif missing is not None:
+                return _write_failure(steps, missing, event_id or known_google_id)
+        if not event_id:
+            inserted, conflict = self._insert_stable(stable_id, body, headers)
+            if inserted:
+                event_id = inserted
                 steps.append(StepRecord("upsert_event", True, "Created one app-owned Google event.", event_id))
-        except TransportError as exc:
-            steps.append(StepRecord("upsert_event", False, exc.body, event_id))
-            kept = event_id or known_google_id
-            return AdapterResult(
-                ok=False,
-                status="failed",
-                sync_state="not_synced",
-                google_event_id=kept,
-                honest_label=(
-                    "Not synced. Google Calendar write failed. "
-                    + ("The recorded event id was kept. No new event was created." if kept else "No success is claimed.")
-                ),
-                steps=steps,
-                error=exc.body,
-                mode="live",
-            )
+            elif conflict is not None and conflict.status == 409:
+                patched, missing = self._patch_event(stable_id, body, headers)
+                if patched:
+                    event_id = stable_id
+                    steps.append(
+                        StepRecord(
+                            "upsert_event",
+                            True,
+                            "Google already had this deterministic id. Updated it instead of inserting another.",
+                            event_id,
+                        )
+                    )
+                else:
+                    return _write_failure(steps, missing or conflict, stable_id)
+            elif conflict is not None:
+                return _write_failure(steps, conflict, known_google_id)
+            else:
+                return AdapterResult(
+                    ok=False,
+                    status="failed",
+                    sync_state="not_synced",
+                    google_event_id=None,
+                    honest_label="Not synced. Google did not return an event id. No success is claimed.",
+                    steps=steps + [StepRecord("upsert_event", False, "Missing event id.")],
+                    error="missing_event_id",
+                    mode="live",
+                )
         if payload.get("invite_work_email"):
             if not self.work_email:
                 steps.append(
@@ -575,6 +600,7 @@ class GoogleCalendarAdapter:
                     steps=steps,
                     error=exc.body,
                     mode="live",
+                    retry_after=exc.retry_after,
                 )
         return AdapterResult(
             ok=True,
@@ -586,8 +612,74 @@ class GoogleCalendarAdapter:
             mode="live",
         )
 
+    def _fetch_stable(self, stable_id: str, headers: dict) -> tuple[str | None, AdapterResult | None]:
+        try:
+            fetched = self.transport.request(
+                "GET",
+                f"{self._events_url()}/{urllib.parse.quote(stable_id, safe='')}",
+                params=None,
+                json_body=None,
+                headers=headers,
+            )
+        except TransportError as exc:
+            if exc.status in {404, 410}:
+                return None, None
+            return None, _live_failure("lookup_event", exc.body, None, retry_after=exc.retry_after)
+        if isinstance(fetched, dict) and fetched.get("id") and fetched.get("status") != "cancelled":
+            return str(fetched["id"]), None
+        return None, None
 
-def _live_failure(step: str, detail: str, kept_id: str | None = None) -> AdapterResult:
+    def _patch_event(self, event_id: str, body: dict, headers: dict) -> tuple[bool, TransportError | None]:
+        try:
+            self.transport.request(
+                "PATCH",
+                f"{self._events_url()}/{urllib.parse.quote(event_id, safe='')}",
+                params={"sendUpdates": "none"},
+                json_body=body,
+                headers=headers,
+            )
+        except TransportError as exc:
+            return False, exc
+        return True, None
+
+    def _insert_stable(self, stable_id: str, body: dict, headers: dict) -> tuple[str | None, TransportError | None]:
+        insert_body = dict(body)
+        insert_body["id"] = stable_id
+        try:
+            created = self.transport.request(
+                "POST",
+                self._events_url(),
+                params={"sendUpdates": "none"},
+                json_body=insert_body,
+                headers=headers,
+            )
+        except TransportError as exc:
+            return None, exc
+        event_id = created.get("id") if isinstance(created, dict) else None
+        if not event_id:
+            return None, None
+        return str(event_id), None
+
+
+def _write_failure(steps: list[StepRecord], exc: TransportError, kept: str | None) -> AdapterResult:
+    steps.append(StepRecord("upsert_event", False, exc.body, kept))
+    return AdapterResult(
+        ok=False,
+        status="failed",
+        sync_state="not_synced",
+        google_event_id=kept,
+        honest_label=(
+            "Not synced. Google Calendar write failed. "
+            + ("The recorded event id was kept. No new event was created." if kept else "No success is claimed.")
+        ),
+        steps=steps,
+        error=exc.body,
+        mode="live",
+        retry_after=exc.retry_after,
+    )
+
+
+def _live_failure(step: str, detail: str, kept_id: str | None = None, retry_after: float | None = None) -> AdapterResult:
     if kept_id:
         label = (
             "Lookup failed before another write. The recorded Google event id was kept. "
@@ -604,7 +696,40 @@ def _live_failure(step: str, detail: str, kept_id: str | None = None) -> Adapter
         steps=[StepRecord(step, False, detail)],
         error=detail,
         mode="live",
+        retry_after=retry_after,
     )
+
+
+def deterministic_event_id(event_key: str) -> str:
+    """Stable Google event id for one TAFO event key. Base32hex, 5–1024 chars."""
+    digest = hashlib.sha256(event_key.encode("utf-8")).hexdigest()
+    return f"tafo{digest}"
+
+
+def parse_retry_after(value: str | None) -> float | None:
+    if value is None or not str(value).strip():
+        return None
+    try:
+        return max(0.0, min(float(str(value).strip()), 30.0))
+    except ValueError:
+        return None
+
+
+def restrict_private_file(path: Path) -> None:
+    """Owner read/write only (mode 0600).
+
+    Checked on Linux. Windows was not executed: ``os.chmod`` does not install a
+    Windows ACL, so on that platform this only best-effort clears the Unix mode bits.
+    """
+    os.chmod(path, 0o600)
+
+
+def write_private_text(path: Path, text: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+        handle.write(text)
+    restrict_private_file(path)
 
 
 def _google_time(value: str, end_of_date: bool = False) -> datetime:

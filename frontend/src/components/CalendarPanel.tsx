@@ -1,4 +1,4 @@
-import { api, formatWhen } from "../api";
+import { api, formatWhen, reportFailure } from "../api";
 import type { AuditEntry, Availability, CalendarBlock, Meta, OutboxOperation } from "../types";
 
 interface Props {
@@ -90,7 +90,7 @@ export function CalendarPanel({ meta, blocks, operations, availability, audit, o
                   onClick={() => {
                     api(`/api/calendar/outbox/${operation.id}/retry`, { method: "POST" })
                       .then(() => onRefresh())
-                      .catch((error: unknown) => onError(error instanceof Error ? error.message : "Retry failed"));
+                      .catch((error: unknown) => { void reportFailure(error, onRefresh, onError); });
                   }}
                 >
                   Retry

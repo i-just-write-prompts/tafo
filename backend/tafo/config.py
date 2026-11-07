@@ -10,6 +10,23 @@ from zoneinfo import ZoneInfo
 LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "::1"}
 
 
+def host_is_loopback(header: str | None) -> bool:
+    """True when the Host header names loopback, with or without a port."""
+    if not header:
+        return False
+    raw = header.split(",")[0].strip().lower()
+    if raw.startswith("["):
+        end = raw.find("]")
+        if end < 0:
+            return False
+        name = raw[1:end]
+    elif raw.count(":") == 1:
+        name = raw.split(":", 1)[0]
+    else:
+        name = raw
+    return name in LOOPBACK_HOSTS
+
+
 def _flag(value: str | None, default: bool = False) -> bool:
     if value is None:
         return default

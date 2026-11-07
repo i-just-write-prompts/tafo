@@ -6,6 +6,7 @@ import sqlite3
 from datetime import datetime
 
 from tafo.audit import write_audit
+from tafo.outbox import ensure_outbox
 from tafo.problems import Problem
 from tafo.timeutil import new_id, parse_utc, utc_now, utc_now_iso
 
@@ -256,16 +257,49 @@ def update_task(conn: sqlite3.Connection, task_id: str, changes: dict, expected_
     return task
 
 
-def delete_task(conn: sqlite3.Connection, task_id: str, expected_version: int, *, actor: str) -> None:
+def delete_task(
+    conn: sqlite3.Connection,
+    task_id: str,
+    expected_version: int,
+    *,
+    actor: str,
+    calendar_mode: str,
+) -> list[str]:
     row = conn.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()
     if row is None:
         raise Problem(404, "not_found", "Task not found.")
     if row["version"] != expected_version:
         raise Problem(409, "version_conflict", "This task changed since you loaded it.", current_version=row["version"])
+    blocks = conn.execute(
+        "SELECT * FROM calendar_blocks WHERE task_id = ? AND status = 'scheduled'",
+        (task_id,),
+    ).fetchall()
+    cancel_ids: list[str] = []
+    for block in blocks:
+        payload = {
+            "event_key": block["id"],
+            "task_id": None,
+            "title": block["title"],
+            "description": block["description"],
+            "starts_at": block["starts_at"],
+            "ends_at": block["ends_at"],
+            "domain": block["domain"],
+            "invite_work_email": bool(block["invite_work_email"]),
+            "fixed": bool(block["fixed"]),
+        }
+        proposal_id = block["origin_proposal_id"] or f"taskdel:{task_id}"
+        outbox_id = ensure_outbox(conn, proposal_id, "calendar_cancel", payload, calendar_mode)
+        if calendar_mode != "demo" and block["google_event_id"]:
+            conn.execute(
+                "UPDATE outbox_operations SET google_event_id = ? WHERE id = ? AND google_event_id IS NULL",
+                (block["google_event_id"], outbox_id),
+            )
+        cancel_ids.append(outbox_id)
     cursor = conn.execute("DELETE FROM tasks WHERE id = ? AND version = ?", (task_id, expected_version))
     if cursor.rowcount != 1:
         raise Problem(409, "version_conflict", "This task changed since you loaded it.")
-    write_audit(conn, actor=actor, action="task.delete", entity_type="task", entity_id=task_id, detail={})
+    write_audit(conn, actor=actor, action="task.delete", entity_type="task", entity_id=task_id, detail={"cancellations": cancel_ids})
+    return cancel_ids
 
 
 def move_task(
@@ -309,10 +343,12 @@ def move_task(
     )
     if cursor.rowcount != 1:
         raise Problem(409, "version_conflict", "This task changed since you loaded it.")
-    conn.execute(
-        "UPDATE tasks SET sort_order = ?, version = version + 1, updated_at = ? WHERE id = ?",
-        (new_other, now, other["id"]),
+    neighbor = conn.execute(
+        "UPDATE tasks SET sort_order = ?, version = version + 1, updated_at = ? WHERE id = ? AND version = ?",
+        (new_other, now, other["id"], other["version"]),
     )
+    if neighbor.rowcount != 1:
+        raise Problem(409, "version_conflict", "Another task in this list changed. Reload and try again.")
     write_audit(
         conn,
         actor=actor,
@@ -374,11 +410,15 @@ def update_subtask(conn: sqlite3.Connection, sub_id: str, changes: dict, expecte
     return item
 
 
-def delete_subtask(conn: sqlite3.Connection, sub_id: str, *, actor: str) -> None:
+def delete_subtask(conn: sqlite3.Connection, sub_id: str, expected_version: int, *, actor: str) -> None:
     row = conn.execute("SELECT * FROM subtasks WHERE id = ?", (sub_id,)).fetchone()
     if row is None:
         raise Problem(404, "not_found", "Checklist item not found.")
-    conn.execute("DELETE FROM subtasks WHERE id = ?", (sub_id,))
+    if row["version"] != expected_version:
+        raise Problem(409, "version_conflict", "This checklist item changed.", current_version=row["version"])
+    cursor = conn.execute("DELETE FROM subtasks WHERE id = ? AND version = ?", (sub_id, expected_version))
+    if cursor.rowcount != 1:
+        raise Problem(409, "version_conflict", "This checklist item changed.")
     write_audit(conn, actor=actor, action="subtask.delete", entity_type="subtask", entity_id=sub_id, detail={})
 
 
