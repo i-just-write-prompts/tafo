@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
+import threading
 import time
+import uuid
 
 from tafo.audit import write_audit
 from tafo.calendar_adapter import AdapterResult, CalendarAdapter, StepRecord
@@ -14,6 +17,8 @@ from tafo.problems import Problem
 from tafo.timeutil import new_id, utc_now_iso
 
 PROCESSING = "__tafo_processing__"
+_inflight_guard = threading.Lock()
+_inflight: set[str] = set()
 
 OPERATIONS = {
     "calendar_block": "create",
@@ -194,23 +199,87 @@ def _load_outbox(conn: sqlite3.Connection, outbox_id: str) -> sqlite3.Row | None
     return conn.execute("SELECT * FROM outbox_operations WHERE id = ?", (outbox_id,)).fetchone()
 
 
-def _wait_until_settled(settings: Settings, outbox_id: str, seen_attempt: int) -> dict:
-    """Another worker owns this attempt. Do not call the calendar again."""
-    deadline = time.monotonic() + 30
-    latest: sqlite3.Row | None = None
-    while time.monotonic() < deadline:
-        with read_session(settings.db_path) as conn:
-            latest = _load_outbox(conn, outbox_id)
-        if latest is None:
-            raise Problem(404, "not_found", "Outbox operation not found.")
-        if latest["status"] in {"simulated", "synced"}:
-            return serialize_outbox(latest)
-        if int(latest["attempt_count"]) > seen_attempt and latest["last_error"] != PROCESSING:
-            return serialize_outbox(latest)
-        time.sleep(0.05)
-    if latest is None:
-        raise Problem(404, "not_found", "Outbox operation not found.")
-    return serialize_outbox(latest)
+def _pid_alive(pid: int) -> bool:
+    if pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    else:
+        return True
+
+
+def _mark_inflight(outbox_id: str) -> None:
+    with _inflight_guard:
+        _inflight.add(outbox_id)
+
+
+def _clear_inflight(outbox_id: str) -> None:
+    with _inflight_guard:
+        _inflight.discard(outbox_id)
+
+
+def _is_inflight(outbox_id: str) -> bool:
+    with _inflight_guard:
+        return outbox_id in _inflight
+
+
+def _owner_busy(outbox_id: str, last_error: str | None) -> bool:
+    """True only when a live attempt still owns the claim.
+
+    A bare ``__tafo_processing__`` token has no pid, so it is a dead claim from
+    the previous code. A token whose pid is gone, or whose pid is this process
+    but the call is no longer on the stack, is also dead and may be reclaimed.
+    """
+    if not last_error or not str(last_error).startswith(PROCESSING):
+        return False
+    if last_error == PROCESSING:
+        return False
+    _prefix, separator, rest = str(last_error).partition(":")
+    if separator != ":" or _prefix != PROCESSING:
+        return False
+    pid_text, sep, _nonce = rest.partition(":")
+    if not sep:
+        return False
+    try:
+        pid = int(pid_text)
+    except ValueError:
+        return False
+    if not _pid_alive(pid):
+        return False
+    if pid == os.getpid() and not _is_inflight(outbox_id):
+        return False
+    return True
+
+
+def _claim_token() -> str:
+    return f"{PROCESSING}:{os.getpid()}:{uuid.uuid4().hex[:12]}"
+
+
+def _cas_claim(conn: sqlite3.Connection, row: sqlite3.Row, token: str) -> bool:
+    previous = row["last_error"]
+    return conn.execute(
+        """
+        UPDATE outbox_operations
+        SET attempt_count = attempt_count + 1, last_error = ?, updated_at = ?
+        WHERE id = ? AND attempt_count = ? AND status IN ('pending', 'failed', 'partial')
+          AND (
+            (? IS NULL AND last_error IS NULL)
+            OR last_error = ?
+          )
+        """,
+        (
+            token,
+            utc_now_iso(),
+            row["id"],
+            row["attempt_count"],
+            previous,
+            previous,
+        ),
+    ).rowcount == 1
 
 
 def _call_adapter(adapter: CalendarAdapter, operation: str, event_key: str, payload: dict, known: str | None) -> AdapterResult:
@@ -238,64 +307,78 @@ def _call_adapter(adapter: CalendarAdapter, operation: str, event_key: str, payl
 
 
 def process_outbox(settings: Settings, adapter: CalendarAdapter, outbox_id: str) -> dict:
-    """Claim the attempt, call the adapter with no database lock, then store the result."""
-    with session(settings.db_path) as conn:
-        row = _load_outbox(conn, outbox_id)
-        if row is None:
-            raise Problem(404, "not_found", "Outbox operation not found.")
-        if row["status"] in {"simulated", "synced"}:
-            return serialize_outbox(row)
-        seen = int(row["attempt_count"])
-        known = row["google_event_id"]
-        payload = json.loads(row["payload_json"])
-        operation = row["operation"]
-        event_key = row["event_key"]
-        claimed = conn.execute(
-            """
-            UPDATE outbox_operations
-            SET attempt_count = attempt_count + 1, last_error = ?, updated_at = ?
-            WHERE id = ? AND attempt_count = ? AND status IN ('pending', 'failed', 'partial')
-              AND (last_error IS NULL OR last_error != ?)
-            """,
-            (PROCESSING, utc_now_iso(), outbox_id, seen, PROCESSING),
-        ).rowcount == 1
-    if not claimed:
-        return _wait_until_settled(settings, outbox_id, seen)
+    """Claim the attempt, call the adapter with no database lock, then store the result.
 
-    result = _call_adapter(adapter, operation, event_key, payload, known)
-    if settings.calendar_mode == "demo" or getattr(adapter, "mode", "") == "demo":
-        result = enforce_demo(result)
-    gid = _kept_google_id(settings, result, known)
-    with session(settings.db_path) as conn:
-        current = _load_outbox(conn, outbox_id)
-        if current is None:
-            raise Problem(404, "not_found", "Outbox operation not found.")
-        _apply_block(conn, current, payload, result, settings.calendar_mode)
-        now = utc_now_iso()
-        conn.execute(
-            """
-            UPDATE outbox_operations
-            SET status = ?, google_event_id = ?, last_error = ?,
-                honest_label = ?, result_json = ?, updated_at = ?
-            WHERE id = ?
-            """,
-            (
-                result.status,
-                gid,
-                result.error,
-                result.honest_label,
-                json.dumps(result.as_dict()),
-                now,
-                outbox_id,
-            ),
-        )
-        write_audit(
-            conn,
-            actor="human",
-            action="outbox.process",
-            entity_type="outbox",
-            entity_id=outbox_id,
-            detail={"status": result.status, "sync_state": result.sync_state, "attempt": int(current["attempt_count"])},
-        )
-        stored = _load_outbox(conn, outbox_id)
-        return serialize_outbox(stored)
+    A claim whose owner is gone is reclaimed. A claim this process is still inside
+    is left alone, so two callers cannot both create the remote event.
+    """
+    deadline = time.monotonic() + 120
+    claimed = False
+    known = None
+    payload: dict = {}
+    operation = ""
+    event_key = ""
+    try:
+        while True:
+            with session(settings.db_path) as conn:
+                row = _load_outbox(conn, outbox_id)
+                if row is None:
+                    raise Problem(404, "not_found", "Outbox operation not found.")
+                if row["status"] in {"simulated", "synced"}:
+                    return serialize_outbox(row)
+                known = row["google_event_id"]
+                payload = json.loads(row["payload_json"])
+                operation = row["operation"]
+                event_key = row["event_key"]
+                if not _owner_busy(outbox_id, row["last_error"]) and _cas_claim(conn, row, _claim_token()):
+                    _mark_inflight(outbox_id)
+                    claimed = True
+            if claimed:
+                break
+            if time.monotonic() > deadline:
+                raise Problem(
+                    409,
+                    "outbox_busy",
+                    "Another calendar attempt is still running. No second remote write was started.",
+                )
+            time.sleep(0.05)
+        result = _call_adapter(adapter, operation, event_key, payload, known)
+        if settings.calendar_mode == "demo" or getattr(adapter, "mode", "") == "demo":
+            result = enforce_demo(result)
+        gid = _kept_google_id(settings, result, known)
+        with session(settings.db_path) as conn:
+            current = _load_outbox(conn, outbox_id)
+            if current is None:
+                raise Problem(404, "not_found", "Outbox operation not found.")
+            _apply_block(conn, current, payload, result, settings.calendar_mode)
+            now = utc_now_iso()
+            conn.execute(
+                """
+                UPDATE outbox_operations
+                SET status = ?, google_event_id = ?, last_error = ?,
+                    honest_label = ?, result_json = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (
+                    result.status,
+                    gid,
+                    result.error,
+                    result.honest_label,
+                    json.dumps(result.as_dict()),
+                    now,
+                    outbox_id,
+                ),
+            )
+            write_audit(
+                conn,
+                actor="human",
+                action="outbox.process",
+                entity_type="outbox",
+                entity_id=outbox_id,
+                detail={"status": result.status, "sync_state": result.sync_state, "attempt": int(current["attempt_count"])},
+            )
+            stored = _load_outbox(conn, outbox_id)
+            return serialize_outbox(stored)
+    finally:
+        if claimed:
+            _clear_inflight(outbox_id)

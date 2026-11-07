@@ -1,6 +1,8 @@
 import threading
 import time
 import urllib.parse
+
+import pytest
 import urllib.request
 from datetime import timedelta
 
@@ -602,3 +604,214 @@ def test_slow_calendar_write_leaves_task_reads_available(tmp_path):
         assert holder["status"] == 200
         assert adapter.creates == 1
         assert approved.json()["outbox"]["google_event_id"] == "g-slow"
+
+
+class SimulatedCrash(BaseException):
+    """Stands in for a process death inside the calendar call."""
+
+
+class CrashThenReconcile:
+    mode = "live"
+
+    def __init__(self, transport: LookupLossTransport) -> None:
+        self.calls = 0
+        self.inner = GoogleCalendarAdapter(transport, "cal-demo", "worker@example.com", token="test-token")
+
+    def read_busy(self, start, end):
+        del start, end
+        return []
+
+    def create_block(self, event_key, payload, known_google_id=None):
+        self.calls += 1
+        if self.calls == 1:
+            raise SimulatedCrash("simulated death inside create_block")
+        return self.inner.create_block(event_key, payload, known_google_id)
+
+    def update_block(self, event_key, payload, known_google_id=None):
+        return self.create_block(event_key, payload, known_google_id)
+
+    def cancel_block(self, event_key, payload, known_google_id=None):
+        return self.create_block(event_key, payload, known_google_id)
+
+
+def _proposal(client: TestClient, event_key: str) -> dict:
+    response = client.post(
+        "/api/hermes/proposals",
+        json={
+            "source": "tafo-ui",
+            "kind": "calendar_block",
+            "explanation": "Crash recovery sample.",
+            "payload": {
+                "domain": "work",
+                "event_key": event_key,
+                "starts_at": "2026-11-12T15:00:00Z",
+                "ends_at": "2026-11-12T16:00:00Z",
+            },
+        },
+    )
+    assert response.status_code == 201, response.text
+    return response.json()
+
+
+def test_dead_processing_claim_is_reclaimed_and_reconciles_remote_event(tmp_path):
+    from tafo.db import connect, session
+    from tafo.decisions import stage_approval
+    from tafo.outbox import PROCESSING, process_outbox
+
+    transport = LookupLossTransport()
+    transport.fail_patches = 0
+    adapter = CrashThenReconcile(transport)
+    settings = _live_settings(tmp_path)
+    app = create_app(settings, adapter=adapter)
+    with TestClient(app) as client:
+        proposal = _proposal(client, "evt_dead_claim")
+        with session(settings.db_path) as conn:
+            staged = stage_approval(
+                conn,
+                settings,
+                proposal["id"],
+                expected_version=proposal["version"],
+                note="",
+                acknowledge_fixed_move=False,
+                acknowledge_task_drift=False,
+                actor="human",
+            )
+        outbox_id = staged["outbox_id"]
+        with pytest.raises(SimulatedCrash):
+            process_outbox(settings, adapter, outbox_id)
+        stuck = client.get("/api/calendar/outbox").json()["operations"][0]
+        assert stuck["status"] == "pending"
+        assert stuck["attempt_count"] == 1
+        assert stuck["google_event_id"] is None
+        assert str(stuck["last_error"]).startswith(PROCESSING)
+        assert transport.posts == 0
+
+        conn = connect(settings.db_path)
+        conn.execute(
+            "UPDATE outbox_operations SET last_error = ? WHERE id = ?",
+            (PROCESSING, outbox_id),
+        )
+        conn.close()
+        transport.events["g-prior"] = {
+            "id": "g-prior",
+            "extendedProperties": {"private": {"tafoEventKey": "evt_dead_claim"}},
+        }
+        started = time.monotonic()
+        recovered = client.post(f"/api/calendar/outbox/{outbox_id}/retry")
+        elapsed = time.monotonic() - started
+        assert elapsed < 2, elapsed
+        assert recovered.status_code == 200, recovered.text
+        body = recovered.json()
+        assert body["operation"]["status"] == "synced"
+        assert body["operation"]["google_event_id"] == "g-prior"
+        assert body["block"]["google_event_id"] == "g-prior"
+        assert transport.posts == 0
+        assert list(transport.events) == ["g-prior"]
+        assert adapter.calls == 2
+
+
+class GateAdapter:
+    mode = "live"
+
+    def __init__(self) -> None:
+        self.calls = 0
+        self.entered = threading.Event()
+        self.release = threading.Event()
+
+    def read_busy(self, start, end):
+        del start, end
+        return []
+
+    def create_block(self, event_key, payload, known_google_id=None):
+        del event_key, payload, known_google_id
+        self.calls += 1
+        self.entered.set()
+        assert self.release.wait(5)
+        return AdapterResult(
+            ok=True,
+            status="synced",
+            sync_state="synced",
+            google_event_id="g-gate",
+            honest_label="Synced to Google Calendar.",
+            steps=[],
+            mode="live",
+        )
+
+    def update_block(self, event_key, payload, known_google_id=None):
+        return self.create_block(event_key, payload, known_google_id)
+
+    def cancel_block(self, event_key, payload, known_google_id=None):
+        return self.create_block(event_key, payload, known_google_id)
+
+
+def test_baseexception_inside_create_retries_immediately(tmp_path):
+    from tafo.decisions import stage_approval
+    from tafo.db import session
+    from tafo.outbox import process_outbox
+
+    transport = LookupLossTransport()
+    transport.fail_patches = 0
+    adapter = CrashThenReconcile(transport)
+    settings = _live_settings(tmp_path / "immediate")
+    app = create_app(settings, adapter=adapter)
+    with TestClient(app) as client:
+        proposal = _proposal(client, "evt_immediate_retry")
+        with session(settings.db_path) as conn:
+            staged = stage_approval(
+                conn,
+                settings,
+                proposal["id"],
+                expected_version=proposal["version"],
+                note="",
+                acknowledge_fixed_move=False,
+                acknowledge_task_drift=False,
+                actor="human",
+            )
+        with pytest.raises(SimulatedCrash):
+            process_outbox(settings, adapter, staged["outbox_id"])
+        started = time.monotonic()
+        recovered = process_outbox(settings, adapter, staged["outbox_id"])
+        assert time.monotonic() - started < 2
+        assert recovered["status"] == "synced"
+        assert recovered["google_event_id"] == "g1"
+        assert transport.posts == 1
+        assert adapter.calls == 2
+
+
+def test_live_claim_is_not_stolen_by_a_concurrent_attempt(tmp_path):
+    adapter = GateAdapter()
+    app = create_app(_live_settings(tmp_path), adapter=adapter)
+    holder: dict[str, object] = {}
+    with TestClient(app) as first, TestClient(app) as second:
+        proposal = _proposal(first, "evt_live_claim")
+
+        def approve() -> None:
+            holder["first"] = first.post(
+                f"/api/decisions/{proposal['id']}/approve",
+                json={"expected_version": proposal["version"], "confirmed": True},
+            )
+
+        def retry_while_busy() -> None:
+            operation_id = holder["outbox_id"]
+            holder["second"] = second.post(f"/api/calendar/outbox/{operation_id}/retry")
+
+        worker = threading.Thread(target=approve)
+        worker.start()
+        assert adapter.entered.wait(3)
+        assert adapter.calls == 1
+        stuck = first.get("/api/calendar/outbox").json()["operations"][0]
+        holder["outbox_id"] = stuck["id"]
+        waiter = threading.Thread(target=retry_while_busy)
+        waiter.start()
+        time.sleep(0.4)
+        assert adapter.calls == 1
+        assert waiter.is_alive()
+        adapter.release.set()
+        worker.join(5)
+        waiter.join(5)
+        assert adapter.calls == 1
+        assert holder["first"].status_code == 200
+        second_response = holder["second"]
+        assert second_response.status_code == 200
+        assert second_response.json()["operation"]["google_event_id"] == "g-gate"
+        assert second_response.json()["operation"]["id"] == stuck["id"]

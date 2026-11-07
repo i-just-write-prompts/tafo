@@ -16,11 +16,12 @@ TAFO keeps one list across work, home, and personal. **Work / Life / All are vie
 
 ## Demo and live calendar
 
-Google Calendar is the write authority for app-owned blocks when you opt into live mode. Until then, `TAFO_CALENDAR_MODE=demo` is the default.
+Google Calendar is the write authority for app-owned blocks when you opt into live mode. Until then, `TAFO_CALENDAR_MODE=demo` is the default. That default, with the fictional seed, is the supported local demo. It is not a signed-off live Google integration.
 
 - Demo results use `sync_state: simulated` and say they are **not synced**. They never receive a Google event id.
 - Live mode without credentials **fails closed**. The outbox is `failed` / `not synced`. No success is claimed.
 - A partial live failure (event created, invitation step failed) stays visible, keeps the Google event id, and retry updates that same event instead of inserting another. A later lookup error keeps that id as well. An empty lookup does not create a second event for the same key.
+- If the process dies after the outbox claim and before the result is saved, the row can say `__tafo_processing__`. The next attempt reclaims that claim only when this process is not inside the calendar call and the recorded pid is not still running. It then looks up the stable event key before inserting, so an ambiguous earlier create is not duplicated. A claim that is still in progress is left alone.
 - Work blocks can ask Google to invite the address in `TAFO_WORK_INVITE_EMAIL`. The proposal cannot name an address. This is a normal calendar invitation so Outlook can show that one meeting. It does **not** read Outlook, and it does not bypass workplace policy.
 - Busy time is read before a calendar proposal is stored. Fixed appointments are not moved unless you approve that change and send `acknowledge_fixed_move`.
 - Availability is **not conflict-free**. Invite-only integration does not reveal existing Outlook meetings.
