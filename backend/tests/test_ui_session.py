@@ -3,7 +3,6 @@
 from datetime import timedelta
 
 from tafo.timeutil import local_naive_to_utc
-from tafo.ui_session import UiSession
 from zoneinfo import ZoneInfo
 
 from tests.conftest import add_task
@@ -110,79 +109,36 @@ def test_non_ui_caller_cannot_fetch_the_token_or_decide(client):
     assert denied.status_code == 403
     _still_pending(client, proposal)
 
-    forged = client.get(
-        "/api/meta",
-        headers={"Origin": "http://127.0.0.1:5173", "Sec-Fetch-Site": "same-origin"},
-    )
-    assert forged.status_code == 200
-    assert token not in forged.text
-    assert client.app.state.pairing_code not in forged.text
-    assert "set-cookie" not in {key.lower() for key in forged.headers}
-    forged_decision = _decision(
-        client,
-        proposal,
-        "approve",
-        {"X-TAFO-Actor": "human", "Origin": "http://127.0.0.1:5173", "Sec-Fetch-Site": "same-origin"},
-    )
-    assert forged_decision.status_code == 403
-    _still_pending(client, proposal)
-
     omitted_actor = _decision(
         client,
         proposal,
         "approve",
-        {
-            "Origin": "http://127.0.0.1:5173",
-            "Sec-Fetch-Site": "same-origin",
-            "Cookie": f"tafo_ui={token}",
-        },
+        {"Sec-Fetch-Site": "same-origin", "Cookie": f"tafo_ui={token}"},
     )
     assert omitted_actor.status_code == 403
     assert omitted_actor.json()["detail"]["code"] == "ui_session_required"
     _still_pending(client, proposal)
 
-    code = client.app.state.pairing_code
-    for body in (meta.text, contract.text, spec.text, forged.text):
-        assert code not in body
-    paired = client.post("/api/ui/pair", json={"code": f"{code[:4]}-{code[4:]}"})
-    assert paired.status_code == 200, paired.text
-    assert paired.json() == {"paired": True}
-    assert code not in paired.text
-    assert token not in paired.text
-    cookie = paired.headers["set-cookie"]
-    assert cookie.startswith(f"tafo_ui={token}")
+
+def test_real_browser_meta_get_has_sec_fetch_site_and_no_origin(client):
+    """Headed Chrome omits Origin on a same-origin GET and still must receive the cookie."""
+    proposal = _agent_block(client)
+    client.inject_ui_session = False
+    response = client.get("/api/meta", headers={"Sec-Fetch-Site": "same-origin"})
+    assert response.status_code == 200
+    assert "ui_session_token" not in response.text
+    assert client.app.state.ui_session_token not in response.json().values()
+    cookie = response.headers["set-cookie"]
+    assert cookie.startswith(f"tafo_ui={client.app.state.ui_session_token}")
     assert "HttpOnly" in cookie
     assert "SameSite=Strict" in cookie
-    allowed = client.post(
+    approved = client.post(
         f"/api/decisions/{proposal['id']}/approve",
         headers={"X-TAFO-Actor": "human", "Cookie": cookie.split(";", 1)[0]},
         json={"expected_version": proposal["version"], "confirmed": True},
     )
-    assert allowed.status_code == 200, allowed.text
-    assert allowed.json()["proposal"]["status"] == "approved"
-
-
-def test_real_browser_meta_get_has_sec_fetch_site_and_no_origin(client):
-    client.inject_ui_session = False
-    response = client.get("/api/meta", headers={"Sec-Fetch-Site": "same-origin"})
-    assert response.status_code == 200
-    assert "set-cookie" not in {key.lower() for key in response.headers}
-    assert client.app.state.ui_session_token not in response.text
-    assert client.app.state.pairing_code not in response.text
-    session = client.get("/api/ui/session", headers={"Sec-Fetch-Site": "same-origin"})
-    assert session.json() == {"paired": False}
-    assert client.app.state.pairing_code not in session.text
-
-
-def test_wrong_pairing_codes_are_rate_limited(client):
-    client.inject_ui_session = False
-    for _ in range(UiSession.MAX_FAILURES):
-        rejected = client.post("/api/ui/pair", json={"code": "WRONG-CODE"})
-        assert rejected.status_code == 403
-        assert "set-cookie" not in {key.lower() for key in rejected.headers}
-    limited = client.post("/api/ui/pair", json={"code": client.app.state.pairing_code})
-    assert limited.status_code == 429
-    assert limited.json()["detail"]["code"] == "pairing_rate_limited"
+    assert approved.status_code == 200, approved.text
+    assert approved.json()["proposal"]["status"] == "approved"
 
 
 def test_display_zone_stores_dst_as_real_utc():

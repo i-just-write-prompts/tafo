@@ -5,7 +5,6 @@ import { Inbox } from "./components/Inbox";
 import { TaskBoard } from "./components/TaskBoard";
 import { WeekPanel } from "./components/WeekPanel";
 import { PlanSkeleton } from "./plan/CalendarGrid";
-import { PairingPrompt } from "./plan/PairingPrompt";
 import { PlanView } from "./plan/PlanView";
 import { SyncStatus } from "./plan/sync";
 import { TAFO_REV } from "./rev";
@@ -58,7 +57,6 @@ export function App() {
   const [audit, setAudit] = useState<AuditEntry[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [offline, setOffline] = useState(false);
-  const [paired, setPaired] = useState<boolean | null>(null);
   const [now, setNow] = useState(Date.now());
   const refreshRef = useRef<() => Promise<void>>(async () => undefined);
 
@@ -90,8 +88,6 @@ export function App() {
       setWeek(weekBody);
       setAudit(auditBody.entries);
       setAvailability(busyBody);
-      const session = await api<{ paired: boolean }>("/api/ui/session");
-      setPaired(session.paired);
       setError(null);
       setOffline(false);
     } catch (reason) {
@@ -249,7 +245,6 @@ export function App() {
           </details>
         )}
       </footer>
-      {paired === false && !offline && <PairingPrompt onPaired={() => setPaired(true)} />}
       {active && meta && (
         <div className="timerbar">
           <div>

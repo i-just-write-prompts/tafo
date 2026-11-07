@@ -100,11 +100,9 @@ Quick-add is `POST /api/tasks`. Completing a block is `PATCH /api/tasks/{id}` wi
 
 ## Approval trust boundary
 
-Each server launch prints one pairing code to the process console and nowhere else. The page asks for that code. A correct entry sets an HttpOnly `SameSite=Strict` cookie. Approve, deny, and proposal edit then require that cookie and an explicit `X-TAFO-Actor: human`. A missing actor header is not treated as a person. Wrong codes are rate-limited.
+`GET /api/meta` sets an HttpOnly `SameSite=Strict` cookie when the request sends `Sec-Fetch-Site: same-origin`. Headed Chrome does that on a same-origin GET and does not send `Origin`. The JSON body does not contain the secret. Approve, deny, and proposal edit require that cookie and an explicit `X-TAFO-Actor: human`. A missing actor header is not a person. `X-TAFO-Actor: agent` is 403 even if the cookie is attached.
 
-**Prevented.** A normal API or agent client, and a client that only forges `Origin` or `Sec-Fetch-Site`, cannot obtain the cookie and cannot approve, deny, or edit. `GET /api/meta` does not set a cookie, including when that GET looks like a browser request with `Sec-Fetch-Site` and no `Origin`. No API response contains the pairing code or the cookie secret.
-
-**Out of scope.** A same-user process that can read the server console, or that can read the browser profile, can take the code or the cookie. This build does not try to stop that.
+Approvals by agents are deterred, not prevented. A normal API client that does not send `Sec-Fetch-Site` gets no cookie and cannot approve. Any local process that forges browser headers can obtain the cookie and approve. Mike relies on instructing his bots not to.
 
 Keys, with focus outside a text field: `T` today, `W` week, `D` day, `←` `→` move the range (or move a focused block by a day), `↑` `↓` move a focused block 15 minutes, `N` focuses quick-add, `/` focuses find, `A` approves the focused proposal, `X` denies it, `Space` toggles done, `Esc` closes, `Ctrl+Z` undoes the last grid change for 8 seconds.
 
@@ -150,6 +148,10 @@ npm run build
 ```
 
 Covered: task CRUD and filters, timers, weekly bullets, approval gates, optimistic concurrency, duplicate outbox and retry, demo versus live (including no network in demo and fail-closed live), mirror dedupe, fixed appointments, backup, migrations, and the deferred manager response.
+
+## Future
+
+- Phone QR-code approver auth, so Mike or Jeff can scan to authenticate who approves or makes changes.
 
 ## Known gaps
 
