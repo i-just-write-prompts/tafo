@@ -48,7 +48,6 @@ export interface Meta {
   filter_note: string;
   version?: string;
   human_edits_auto_approve?: boolean;
-  ui_session_token?: string;
 }
 
 export interface BusyInterval {

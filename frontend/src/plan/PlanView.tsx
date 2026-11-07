@@ -8,13 +8,14 @@ import { PlanGestures, PlanHit } from "./gestures";
 import { PlanFocus, PlanKeys } from "./keys";
 import { PlanBoard } from "./selectors";
 import { SettingsStub } from "./SettingsStub";
+import { PlanMachine, type MachineEvent } from "./planMachine";
 import { PlanConfig } from "./sync";
 import { PlanProvider, type DragState, type PlanStore } from "./store";
 import { MIN_BLOCK_PX, PX_PER_MINUTE, PlanTime } from "./time";
 import { Toolbar } from "./Toolbar";
 import { UnscheduledSidebar } from "./UnscheduledSidebar";
 
-const DENIED = "Denied. Alternates come in a later slice.";
+const DENIED = "Denied. Alternates aren't built yet.";
 
 interface ToastState {
   message: string;
@@ -38,26 +39,6 @@ interface Props {
   onError: (message: string) => void;
 }
 
-function optimisticBlock(id: string, task: Task, startsAt: string, endsAt: string): CalendarBlock {
-  return {
-    id,
-    task_id: task.id,
-    title: task.title,
-    description: "",
-    starts_at: startsAt,
-    ends_at: endsAt,
-    domain: task.domain,
-    invite_work_email: false,
-    fixed: false,
-    status: "scheduled",
-    sync_state: "simulated",
-    written_mode: "demo",
-    honest_label: "Saving",
-    google_event_id: null,
-    version: 0,
-  };
-}
-
 export function PlanView(props: Props) {
   const timeZone = props.meta.display_timezone;
   const [mode, setMode] = useState<"week" | "day">("week");
@@ -67,18 +48,15 @@ export function PlanView(props: Props) {
   const [now, setNow] = useState(() => new Date());
   const [popoverBlockId, setPopoverBlockId] = useState<string | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
-  const [drag, setDrag] = useState<DragState | null>(null);
   const [busyIds, setBusyIds] = useState<Set<string>>(new Set());
-  const [overrides, setOverrides] = useState<Record<string, { starts_at: string; ends_at: string }>>({});
-  const [extraBlocks, setExtraBlocks] = useState<CalendarBlock[]>([]);
-  const [extraProposals, setExtraProposals] = useState<Proposal[]>([]);
   const [toast, setToast] = useState<ToastState | null>(null);
+  const [live, setLive] = useState("");
+  const machineRef = useRef(PlanMachine.initial());
+  const [machine, setMachine] = useState(machineRef.current);
   const [fixedPrompt, setFixedPrompt] = useState<FixedPrompt | null>(null);
   const scrollerRef = useRef<HTMLDivElement>(null);
   const quickAddRef = useRef<HTMLInputElement>(null);
   const findRef = useRef<HTMLInputElement>(null);
-  const dragRef = useRef<DragState | null>(null);
-  const suppressRef = useRef(false);
   const busyRef = useRef(new Set<string>());
   const toastRef = useRef<ToastState | null>(null);
   const timerRef = useRef<number | null>(null);
@@ -88,16 +66,17 @@ export function PlanView(props: Props) {
   const dayKeys = useMemo(() => PlanTime.visibleDayKeys(anchor, mode), [anchor, mode]);
   const scrollKey = `${mode}:${dayKeys[0] ?? ""}:${dayKeys[dayKeys.length - 1] ?? ""}`;
 
-  const viewBlocks = useMemo(() => {
-    const adjusted = props.blocks.map((block) => {
-      const next = overrides[block.id];
-      if (!next) return block;
-      if (block.starts_at === next.starts_at && block.ends_at === next.ends_at) return block;
-      return { ...block, ...next };
-    });
-    const seen = new Set(adjusted.filter((block) => block.status === "scheduled").map((block) => `${block.task_id}|${block.starts_at}`));
-    return [...adjusted, ...extraBlocks.filter((block) => !seen.has(`${block.task_id}|${block.starts_at}`))];
-  }, [props.blocks, overrides, extraBlocks]);
+  function apply(event: MachineEvent) {
+    const result = PlanMachine.reduce(machineRef.current, event);
+    machineRef.current = result.state;
+    setMachine(result.state);
+    return result;
+  }
+
+  const viewBlocks = useMemo(
+    () => PlanMachine.viewBlocks(props.blocks, machine),
+    [props.blocks, machine],
+  );
 
   const viewProposals = useMemo(() => {
     const seen = new Set(props.proposals.map((proposal) => {
@@ -105,13 +84,13 @@ export function PlanView(props: Props) {
       return `${payload.task_id}|${payload.starts_at}`;
     }));
     const blocked = new Set(props.blocks.filter((block) => block.status === "scheduled").map((block) => `${block.task_id}|${block.starts_at}`));
-    const extras = extraProposals.filter((proposal) => {
+    const extras = machine.extraProposals.filter((proposal) => {
       const payload = proposal.payload;
       const key = `${payload.task_id}|${payload.starts_at}`;
       return !seen.has(key) && !blocked.has(key);
     });
     return [...props.proposals, ...extras];
-  }, [props.proposals, props.blocks, extraProposals]);
+  }, [props.proposals, props.blocks, machine.extraProposals]);
 
   const blocksRef = useRef(viewBlocks);
   blocksRef.current = viewBlocks;
@@ -123,6 +102,7 @@ export function PlanView(props: Props) {
     const next = { message, undo };
     toastRef.current = next;
     setToast(next);
+    setLive(message);
     timerRef.current = window.setTimeout(() => {
       if (toastRef.current === next) {
         toastRef.current = null;
@@ -158,8 +138,7 @@ export function PlanView(props: Props) {
   }
 
   function clearOptimistic(key: string) {
-    setExtraBlocks((prev) => prev.filter((block) => block.id !== `opt-${key}`));
-    setExtraProposals((prev) => prev.filter((proposal) => proposal.id !== `opt-${key}`));
+    apply({ type: "rollback", key });
   }
 
   async function scheduleTask(taskId: string, dayKey: string, startMin: number, key: string) {
@@ -175,9 +154,9 @@ export function PlanView(props: Props) {
     const startsAt = PlanTime.toUtcIso(start);
     const endsAt = PlanTime.toUtcIso(end);
     const auto = PlanConfig.autoApprove(propsRef.current.meta.human_edits_auto_approve);
-    if (auto) setExtraBlocks((prev) => [...prev, optimisticBlock(`opt-${key}`, task, startsAt, endsAt)]);
+    if (auto) apply({ type: "optimistic-block", key, block: PlanMachine.optimisticBlock(`opt-${key}`, task, startsAt, endsAt) });
     else {
-      setExtraProposals((prev) => [...prev, {
+      apply({ type: "optimistic-proposal", key, proposal: {
         id: `opt-${key}`,
         source: "plan",
         source_kind: "human",
@@ -188,7 +167,7 @@ export function PlanView(props: Props) {
         edited_payload: null,
         availability: null,
         version: 1,
-      }]);
+      } });
     }
     try {
       const proposal = await PlanActions.schedule({ task, startsAt, endsAt, timeZone, key });
@@ -233,7 +212,7 @@ export function PlanView(props: Props) {
     const originStart = block.starts_at;
     const originEnd = block.ends_at;
     const title = PlanBoard.titleForBlock(block, propsRef.current.tasks);
-    setOverrides((prev) => ({ ...prev, [block.id]: { starts_at: startsAt, ends_at: endsAt } }));
+    apply({ type: "override", blockId: block.id, span: { starts_at: startsAt, ends_at: endsAt } });
     try {
       const proposal = await PlanActions.updateBlock({
         block,
@@ -248,11 +227,7 @@ export function PlanView(props: Props) {
         await PlanActions.approve(proposal, acknowledge);
       }
       await propsRef.current.onRefresh();
-      setOverrides((prev) => {
-        const next = { ...prev };
-        delete next[block.id];
-        return next;
-      });
+      apply({ type: "clear-override", blockId: block.id });
       showToast(`${action === "resize" ? "Resized" : "Moved"} ${title}.`, async () => {
         const current = blocksRef.current.find((item) => item.id === block.id) ?? block;
         const inverse = await PlanActions.updateBlock({
@@ -269,11 +244,7 @@ export function PlanView(props: Props) {
         }
       });
     } catch (error) {
-      setOverrides((prev) => {
-        const next = { ...prev };
-        delete next[block.id];
-        return next;
-      });
+      apply({ type: "rollback", blockId: block.id });
       await fail(error);
     } finally {
       release(block.id);
@@ -402,22 +373,12 @@ export function PlanView(props: Props) {
   function nudge(blockId: string, minutes: number, days: number) {
     const block = blocksRef.current.find((item) => item.id === blockId);
     if (!block || block.id.startsWith("opt-")) return;
-    const start = new Date(block.starts_at);
-    const end = new Date(block.ends_at);
-    const duration = end.getTime() - start.getTime();
-    if (days !== 0) {
-      const part = PlanTime.parts(start, timeZone);
-      const movedKey = PlanTime.addDaysToKey(PlanTime.dayKey(start, timeZone), days);
-      const [year, month, day] = movedKey.split("-").map(Number);
-      const moved = PlanTime.localToUtc(year, month, day, part.hour, part.minute, timeZone);
-      if (!moved) {
-        showToast("That time doesn't exist on this day.");
-        return;
-      }
-      commitRange(blockId, moved, new Date(moved.getTime() + duration), "move");
+    const span = PlanMachine.nudge(block.starts_at, block.ends_at, minutes, days, timeZone);
+    if (!span) {
+      showToast("That time doesn't exist on this day.");
       return;
     }
-    commitRange(blockId, new Date(start.getTime() + minutes * 60000), new Date(end.getTime() + minutes * 60000), "move");
+    commitRange(blockId, new Date(span.starts_at), new Date(span.ends_at), "move");
   }
 
   async function addTask(title: string, estimate: string) {
@@ -516,31 +477,19 @@ export function PlanView(props: Props) {
 
   useEffect(() => {
     function onMove(event: PointerEvent) {
-      const current = dragRef.current;
-      if (!current || event.pointerId !== current.pointerId) return;
-      const moved = current.moved || Math.hypot(event.clientX - current.originX, event.clientY - current.originY) > 4;
-      const next = { ...current, x: event.clientX, y: event.clientY, moved };
-      dragRef.current = next;
-      setDrag(next);
+      apply({ type: "move", pointerId: event.pointerId, x: event.clientX, y: event.clientY });
     }
     function onUp(event: PointerEvent) {
-      const current = dragRef.current;
-      if (!current || event.pointerId !== current.pointerId) return;
-      dragRef.current = null;
-      setDrag(null);
-      if (current.moved) {
-        suppressRef.current = true;
+      const result = apply({ type: "up", pointerId: event.pointerId });
+      if (result.state.suppressClick) {
         window.setTimeout(() => {
-          suppressRef.current = false;
+          apply({ type: "consume-click" });
         }, 0);
       }
-      finishRef.current(current, event.clientX, event.clientY);
+      if (result.commit) finishRef.current(result.commit, event.clientX, event.clientY);
     }
     function onCancel(event: PointerEvent) {
-      const current = dragRef.current;
-      if (!current || event.pointerId !== current.pointerId) return;
-      dragRef.current = null;
-      setDrag(null);
+      apply({ type: "cancel", pointerId: event.pointerId });
     }
     window.addEventListener("pointermove", onMove);
     window.addEventListener("pointerup", onUp);
@@ -554,9 +503,8 @@ export function PlanView(props: Props) {
 
   useEffect(() => {
     function onKey(event: KeyboardEvent) {
-      if (event.key === "Escape" && dragRef.current) {
-        dragRef.current = null;
-        setDrag(null);
+      if (event.key === "Escape" && machineRef.current.drag) {
+        apply({ type: "escape" });
         event.preventDefault();
         return;
       }
@@ -664,6 +612,7 @@ export function PlanView(props: Props) {
     return () => window.removeEventListener("keydown", onKey);
   });
 
+  const drag = machine.drag;
   const ghostTitle = drag?.kind === "schedule"
     ? props.tasks.find((task) => task.id === drag.taskId)?.title ?? "Schedule"
     : "Move";
@@ -692,12 +641,11 @@ export function PlanView(props: Props) {
     shift: (direction) => setAnchor((current) => PlanTime.addDaysToKey(current, mode === "week" ? direction * 7 : direction)),
     openSettings: () => setSettingsOpen(true),
     beginDrag: (next) => {
-      dragRef.current = next;
-      setDrag(next);
+      apply({ type: "begin", drag: next });
     },
     takeClick: () => {
-      if (!suppressRef.current) return false;
-      suppressRef.current = false;
+      if (!machineRef.current.suppressClick) return false;
+      apply({ type: "consume-click" });
       return true;
     },
     openPopover: (blockId) => {
@@ -749,6 +697,7 @@ export function PlanView(props: Props) {
           </div>
         </div>
       )}
+      <div className="sr-only" aria-live="polite" aria-atomic="true" data-testid="plan-live">{live}</div>
       {toast && (
         <div className="toast" role="status" data-testid={toast.undo ? "undo-toast" : "plan-toast"}>
           <p>{toast.message}</p>

@@ -1,6 +1,7 @@
 /** Grid geometry and display-zone clock math. One pixel scale for the whole plan. */
 
 export const SNAP_MINUTES = 15;
+// A 15-minute block is 18px, which lands exactly on the minimum block height.
 export const PX_PER_SNAP = 18;
 export const PX_PER_MINUTE = PX_PER_SNAP / SNAP_MINUTES;
 export const MIN_BLOCK_PX = 18;

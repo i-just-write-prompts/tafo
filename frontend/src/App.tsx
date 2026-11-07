@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { OFFLINE_MESSAGE, UiSession, api, formatWhen } from "./api";
+import { OFFLINE_MESSAGE, api, formatWhen } from "./api";
 import { CalendarPanel } from "./components/CalendarPanel";
 import { Inbox } from "./components/Inbox";
 import { TaskBoard } from "./components/TaskBoard";
@@ -79,7 +79,6 @@ export function App() {
         api<{ entries: AuditEntry[] }>("/api/audit?limit=8"),
         api<Availability>("/api/calendar/availability"),
       ]);
-      UiSession.bind(nextMeta.ui_session_token);
       setMeta(nextMeta);
       setTasks(taskBody.tasks);
       setProposals(proposalBody.proposals);

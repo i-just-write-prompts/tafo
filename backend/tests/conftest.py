@@ -24,8 +24,18 @@ class LoopbackTestClient(fastapi_testclient.TestClient):
             pairs = headers.items() if hasattr(headers, "items") else headers
             for key, value in pairs:
                 merged[str(key)] = value
-        if not any(key.lower() == "x-tafo-ui-session" for key in merged):
-            merged["X-TAFO-UI-Session"] = token
+        lower = {key.lower() for key in merged}
+        if "x-tafo-actor" not in lower:
+            merged["X-TAFO-Actor"] = "human"
+        if "origin" not in lower:
+            merged["Origin"] = "http://127.0.0.1"
+        if "sec-fetch-site" not in lower:
+            merged["Sec-Fetch-Site"] = "same-origin"
+        cookie = merged.get("Cookie") or merged.get("cookie")
+        if cookie is None:
+            merged["Cookie"] = f"tafo_ui={token}"
+        elif "tafo_ui=" not in cookie:
+            merged["Cookie"] = f"{cookie}; tafo_ui={token}"
         return merged
 
     def request(self, method, url, **kwargs):

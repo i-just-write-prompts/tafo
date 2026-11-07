@@ -96,7 +96,24 @@ These calls are for a person or a cooperative agent on loopback. Send no `X-TAFO
 
 Plan is the human path for the week. It reads tasks, blocks, and proposals that already exist. Every block change is still a proposal, then an approval. There is no separate calendar write API.
 
-The page loads a per-launch session from `GET /api/meta` (`ui_session_token`) and sends it as `X-TAFO-UI-Session` only on `/api/decisions/...`. Approve, deny, and edit from the grid use that header. Quick-add is `POST /api/tasks`. Completing a block is `PATCH /api/tasks/{id}` with `expected_version`. Scheduling, moving, resizing, and removing go through `POST /api/hermes/proposals` (`calendar_block`, `calendar_update`, or `calendar_cancel`, `source_kind: human`) and then the decision route when "My own edits: approved right away" is on.
+Quick-add is `POST /api/tasks`. Completing a block is `PATCH /api/tasks/{id}` with `expected_version`. Scheduling, moving, resizing, and removing go through `POST /api/hermes/proposals` (`calendar_block`, `calendar_update`, or `calendar_cancel`, `source_kind: human`) and then the decision route when "My own edits: approved right away" is on. The page sends `X-TAFO-Actor: human` on those decision calls. Omitting that header is not treated as a person.
+
+## Approval trust boundary
+
+Approve, deny, and proposal edit (`POST /api/decisions/...`) fail closed. They are not authorized by a missing `X-TAFO-Actor` header. That header used to default to `human`. It no longer does on these routes.
+
+**Prevented.** A normal API or agent client cannot approve, deny, or edit.
+
+- JSON responses, including `GET /api/meta`, `GET /api/hermes/contract`, and OpenAPI, do not contain the session secret.
+- A request that does not send browser fetch metadata does not receive the `Set-Cookie` for the HttpOnly `tafo_ui` cookie (`SameSite=Strict`).
+- These calls return **403** and change nothing: no `X-TAFO-Actor` header, `X-TAFO-Actor: agent` (even if a cookie is attached), and any call without the cookie. The browser page sends `X-TAFO-Actor: human`, a loopback `Origin`, `Sec-Fetch-Site: same-origin`, and the cookie the browser stored. Page script cannot read the cookie.
+
+**Deterred, not prevented.** There is still no account system on loopback.
+
+- A client that forges a loopback `Origin` and `Sec-Fetch-Site: same-origin` on `GET /api/meta` receives `Set-Cookie` and can replay that cookie with `X-TAFO-Actor: human`.
+- A same-user process that can read the browser profile can copy the cookie and replay it the same way.
+
+The Hermes contract does not describe this cookie.
 
 Keys, with focus outside a text field: `T` today, `W` week, `D` day, `←` `→` move the range (or move a focused block by a day), `↑` `↓` move a focused block 15 minutes, `N` focuses quick-add, `/` focuses find, `A` approves the focused proposal, `X` denies it, `Space` toggles done, `Esc` closes, `Ctrl+Z` undoes the last grid change for 8 seconds.
 
@@ -117,7 +134,7 @@ In another terminal, `cd frontend && npm run dev`, then open `http://127.0.0.1:5
 
 - Agents `POST /api/hermes/proposals` with `X-TAFO-Actor: agent` and an `idempotency_key`.
 - That call does not change tasks or blocks. `calendar_block`, `calendar_update`, `calendar_cancel`, and `task_change` all stay pending.
-- Approve, edit, and reject are only for the local Plan page. An agent header, or any other caller that is not that page session, gets **403** and the proposal stays as it was.
+- Approve, edit, and reject are only for the local Plan page. See "Approval trust boundary" above. An agent header, a missing actor header, or a call without the browser session gets **403** and the proposal stays as it was.
 - The same paths under `/api/hermes/...` return 403.
 - Requests that send `X-TAFO-Actor: agent` cannot patch tasks, run timers, edit the week, approve, or restore a backup.
 - This header is an integration rule for cooperative agents, not authentication. Anything that can reach the loopback port can still submit proposals.

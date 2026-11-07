@@ -128,10 +128,17 @@ def _require_confirmed(confirmed: bool) -> None:
 
 
 def _require_decision(request: Request) -> str:
-    """Human decision routes. Agents stay on the existing 403. Everyone else needs the UI session."""
-    actor = _require_human(request)
+    """Approve, deny, and edit. A missing actor is not a person, and a header is not a session."""
+    raw = request.headers.get("x-tafo-actor")
+    if raw is None or not raw.strip():
+        raise Problem(
+            403,
+            "ui_session_required",
+            "Approve, deny, and edit are only accepted from the local UI session.",
+        )
+    _require_human(request)
     UiSession.accept(request)
-    return actor
+    return "human"
 
 
 def _finish(settings: Settings, adapter: CalendarAdapter, staged: dict) -> dict:
@@ -211,6 +218,13 @@ def create_app(settings: Settings | None = None, adapter: CalendarAdapter | None
             )
         return await call_next(request)
 
+    @app.middleware("http")
+    async def issue_ui_cookie(request: Request, call_next):
+        response = await call_next(request)
+        if response.status_code == 200 and UiSession.should_issue(request):
+            response.headers.append("set-cookie", UiSession.cookie_header(request.app.state.ui_session_token))
+        return response
+
     @app.exception_handler(Problem)
     async def problem_handler(_request: Request, exc: Problem) -> JSONResponse:
         return JSONResponse(
@@ -245,7 +259,6 @@ def create_app(settings: Settings | None = None, adapter: CalendarAdapter | None
             "notices": NOTICES,
             "filter_note": "Work, Life, and All are view filters. They are not a security boundary.",
             "human_edits_auto_approve": settings.human_edits_auto_approve,
-            "ui_session_token": ui_session_token,
         }
 
     @app.get("/api/hermes/contract", tags=["hermes"])

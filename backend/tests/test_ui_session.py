@@ -35,63 +35,110 @@ def _still_pending(client, proposal: dict) -> None:
     assert fresh["version"] == proposal["version"]
 
 
-def test_agent_and_api_cannot_approve_or_deny(client):
+def _decision(client, proposal: dict, action: str, headers: dict | None):
+    return client.post(
+        f"/api/decisions/{proposal['id']}/{action}",
+        headers=headers,
+        json={"expected_version": proposal["version"], "confirmed": True, "payload": {"op": "update"}},
+    )
+
+
+def test_non_ui_caller_cannot_fetch_the_token_or_decide(client):
     proposal = _agent_block(client)
     token = client.app.state.ui_session_token
     assert token
     client.inject_ui_session = False
 
-    agent = client.post(
-        f"/api/decisions/{proposal['id']}/approve",
-        headers={"X-TAFO-Actor": "agent", "X-TAFO-UI-Session": token},
-        json={"expected_version": proposal["version"], "confirmed": True},
-    )
+    meta = client.get("/api/meta")
+    assert meta.status_code == 200
+    dumped_meta = meta.text
+    assert token not in dumped_meta
+    assert "ui_session_token" not in dumped_meta
+    assert "set-cookie" not in {key.lower() for key in meta.headers}
+    assert meta.json()["human_edits_auto_approve"] is True
+
+    contract = client.get("/api/hermes/contract")
+    assert token not in contract.text
+    assert "tafo_ui" not in contract.text.lower()
+    spec = client.get("/openapi.json")
+    assert token not in spec.text
+
+    no_actor = _decision(client, proposal, "approve", None)
+    assert no_actor.status_code == 403
+    assert no_actor.json()["detail"]["code"] == "ui_session_required"
+    _still_pending(client, proposal)
+
+    agent = _decision(client, proposal, "approve", {"X-TAFO-Actor": "agent"})
     assert agent.status_code == 403
     _still_pending(client, proposal)
 
-    missing = client.post(
-        f"/api/decisions/{proposal['id']}/approve",
-        json={"expected_version": proposal["version"], "confirmed": True},
+    agent_with_cookie = _decision(
+        client,
+        proposal,
+        "reject",
+        {
+            "X-TAFO-Actor": "agent",
+            "Origin": "http://127.0.0.1:5173",
+            "Sec-Fetch-Site": "same-origin",
+            "Cookie": f"tafo_ui={token}",
+        },
     )
-    assert missing.status_code == 403
-    assert missing.json()["detail"]["code"] == "ui_session_required"
+    assert agent_with_cookie.status_code == 403
     _still_pending(client, proposal)
 
-    denied = client.post(
-        f"/api/decisions/{proposal['id']}/reject",
-        json={"expected_version": proposal["version"], "confirmed": True},
+    token_less = _decision(
+        client,
+        proposal,
+        "approve",
+        {"X-TAFO-Actor": "human", "Origin": "http://127.0.0.1:5173", "Sec-Fetch-Site": "same-origin"},
     )
+    assert token_less.status_code == 403
+    assert token_less.json()["detail"]["code"] == "ui_session_required"
+    _still_pending(client, proposal)
+
+    edited = _decision(
+        client,
+        proposal,
+        "edit",
+        {"X-TAFO-Actor": "human", "Origin": "http://127.0.0.1:5173", "Sec-Fetch-Site": "same-origin"},
+    )
+    assert edited.status_code == 403
+    _still_pending(client, proposal)
+
+    denied = _decision(client, proposal, "reject", None)
     assert denied.status_code == 403
     _still_pending(client, proposal)
 
-    wrong = client.post(
-        f"/api/decisions/{proposal['id']}/approve",
-        headers={"X-TAFO-UI-Session": "not-the-session"},
-        json={"expected_version": proposal["version"], "confirmed": True},
+    browser = client.get(
+        "/api/meta",
+        headers={"Origin": "http://127.0.0.1:5173", "Sec-Fetch-Site": "same-origin"},
     )
-    assert wrong.status_code == 403
+    assert token not in browser.text
+    assert f"tafo_ui={token}" in browser.headers.get("set-cookie", "")
+    assert "HttpOnly" in browser.headers.get("set-cookie", "")
+    assert "SameSite=Strict" in browser.headers.get("set-cookie", "")
+
+    omitted_actor = _decision(
+        client,
+        proposal,
+        "approve",
+        {
+            "Origin": "http://127.0.0.1:5173",
+            "Sec-Fetch-Site": "same-origin",
+            "Cookie": f"tafo_ui={token}",
+        },
+    )
+    assert omitted_actor.status_code == 403
+    assert omitted_actor.json()["detail"]["code"] == "ui_session_required"
     _still_pending(client, proposal)
 
-    contract = client.get("/api/hermes/contract").json()
-    dumped = str(contract).lower()
-    assert "ui_session" not in dumped
-    assert "x-tafo-ui-session" not in dumped
-
+    client.inject_ui_session = True
     allowed = client.post(
         f"/api/decisions/{proposal['id']}/approve",
-        headers={"X-TAFO-UI-Session": token},
         json={"expected_version": proposal["version"], "confirmed": True},
     )
     assert allowed.status_code == 200, allowed.text
     assert allowed.json()["proposal"]["status"] == "approved"
-
-
-def test_meta_hands_the_session_to_the_page_only(client):
-    meta = client.get("/api/meta").json()
-    assert meta["ui_session_token"] == client.app.state.ui_session_token
-    assert meta["human_edits_auto_approve"] is True
-    contract = client.get("/api/hermes/contract").json()
-    assert "ui_session_token" not in contract
 
 
 def test_display_zone_stores_dst_as_real_utc():
