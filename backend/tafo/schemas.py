@@ -86,3 +86,7 @@ class WeekRegenerate(BaseModel):
 class RestoreBody(BaseModel):
     confirm: str
     snapshot: dict
+
+
+class PairBody(BaseModel):
+    code: str = Field(min_length=1, max_length=32)

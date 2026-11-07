@@ -30,6 +30,7 @@ from tafo.problems import Problem
 from tafo.schemas import (
     DecisionBody,
     EditBody,
+    PairBody,
     ProposalCreate,
     RestoreBody,
     SubtaskCreate,
@@ -168,10 +169,13 @@ def create_app(settings: Settings | None = None, adapter: CalendarAdapter | None
     if adapter is None:
         adapter = build_adapter(settings)
     ui_session_token = UiSession.mint()
+    pairing_code = UiSession.mint_code()
+    pairing_display = UiSession.format_code(pairing_code)
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
         init_db(settings, adapter)
+        print(f"TAFO pairing code: {pairing_display}", flush=True)
         if settings.calendar_mode == "demo":
             print("TAFO calendar mode: demo. Blocks are simulated and NOT synced to Google.")
         elif settings.google_configured:
@@ -192,6 +196,8 @@ def create_app(settings: Settings | None = None, adapter: CalendarAdapter | None
     app.state.settings = settings
     app.state.adapter = adapter
     app.state.ui_session_token = ui_session_token
+    app.state.pairing_code = pairing_code
+    app.state.pairing_failures = []
     app.add_middleware(
         CORSMiddleware,
         allow_origins=[
@@ -218,13 +224,6 @@ def create_app(settings: Settings | None = None, adapter: CalendarAdapter | None
             )
         return await call_next(request)
 
-    @app.middleware("http")
-    async def issue_ui_cookie(request: Request, call_next):
-        response = await call_next(request)
-        if response.status_code == 200 and UiSession.should_issue(request):
-            response.headers.append("set-cookie", UiSession.cookie_header(request.app.state.ui_session_token))
-        return response
-
     @app.exception_handler(Problem)
     async def problem_handler(_request: Request, exc: Problem) -> JSONResponse:
         return JSONResponse(
@@ -235,6 +234,17 @@ def create_app(settings: Settings | None = None, adapter: CalendarAdapter | None
     @app.get("/api/health", tags=["meta"])
     def health() -> dict:
         return {"ok": True, "service": "tafo"}
+
+    @app.get("/api/ui/session", tags=["meta"])
+    def ui_session(request: Request) -> dict:
+        return {"paired": UiSession.paired(request)}
+
+    @app.post("/api/ui/pair", tags=["meta"])
+    def ui_pair(body: PairBody, request: Request) -> JSONResponse:
+        UiSession.redeem(request, body.code)
+        response = JSONResponse({"paired": True})
+        response.headers["set-cookie"] = UiSession.cookie_header(request.app.state.ui_session_token)
+        return response
 
     @app.get("/api/meta", tags=["meta"])
     def meta() -> dict:

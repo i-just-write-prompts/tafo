@@ -27,10 +27,6 @@ class LoopbackTestClient(fastapi_testclient.TestClient):
         lower = {key.lower() for key in merged}
         if "x-tafo-actor" not in lower:
             merged["X-TAFO-Actor"] = "human"
-        if "origin" not in lower:
-            merged["Origin"] = "http://127.0.0.1"
-        if "sec-fetch-site" not in lower:
-            merged["Sec-Fetch-Site"] = "same-origin"
         cookie = merged.get("Cookie") or merged.get("cookie")
         if cookie is None:
             merged["Cookie"] = f"tafo_ui={token}"

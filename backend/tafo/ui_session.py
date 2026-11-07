@@ -1,48 +1,46 @@
 """Browser session for approve, deny, and proposal edit.
 
-The secret is an HttpOnly cookie. It is not part of any JSON body. A request
-that omits the actor header is not treated as a person.
+The cookie is issued only after a person enters the pairing code printed on
+the server console at launch. No HTTP response contains that code or the
+cookie's secret.
 """
 
 from __future__ import annotations
 
 import secrets
-from urllib.parse import urlparse
+import time
 
 from fastapi import Request
 
-from tafo.config import LOOPBACK_HOSTS
 from tafo.problems import Problem
+
+ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
 
 
 class UiSession:
     COOKIE = "tafo_ui"
+    WINDOW_SECONDS = 60.0
+    MAX_FAILURES = 5
 
     @staticmethod
     def mint() -> str:
         return secrets.token_urlsafe(32)
 
     @staticmethod
+    def mint_code() -> str:
+        return "".join(secrets.choice(ALPHABET) for _ in range(8))
+
+    @staticmethod
+    def format_code(code: str) -> str:
+        return f"{code[:4]}-{code[4:]}"
+
+    @staticmethod
+    def normalize_code(raw: str) -> str:
+        return "".join(ch for ch in raw.upper() if ch.isalnum())
+
+    @staticmethod
     def cookie_header(token: str) -> str:
         return f"{UiSession.COOKIE}={token}; HttpOnly; SameSite=Strict; Path=/"
-
-    @staticmethod
-    def origin_is_loopback(origin: str | None) -> bool:
-        if not origin:
-            return False
-        parsed = urlparse(origin.strip())
-        if parsed.scheme not in {"http", "https"} or not parsed.hostname:
-            return False
-        return parsed.hostname.lower() in LOOPBACK_HOSTS
-
-    @staticmethod
-    def should_issue(request: Request) -> bool:
-        """Hand the cookie only to a same-origin browser fetch, not to a plain API call."""
-        if request.method != "GET" or request.url.path != "/api/meta":
-            return False
-        if request.headers.get("sec-fetch-site") != "same-origin":
-            return False
-        return UiSession.origin_is_loopback(request.headers.get("origin"))
 
     @staticmethod
     def _matches(sent: str, expected: str) -> bool:
@@ -53,23 +51,26 @@ class UiSession:
         return secrets.compare_digest(sent, expected)
 
     @staticmethod
-    def accept(request: Request) -> None:
-        """Cookie plus a loopback browser Origin. A header alone is not proof."""
-        if not UiSession.origin_is_loopback(request.headers.get("origin")):
-            raise Problem(
-                403,
-                "ui_session_required",
-                "Approve, deny, and edit are only accepted from the local UI session.",
-            )
-        if request.headers.get("sec-fetch-site") != "same-origin":
-            raise Problem(
-                403,
-                "ui_session_required",
-                "Approve, deny, and edit are only accepted from the local UI session.",
-            )
+    def paired(request: Request) -> bool:
         expected = getattr(request.app.state, "ui_session_token", "")
         sent = request.cookies.get(UiSession.COOKIE, "")
-        if not UiSession._matches(sent, expected):
+        return UiSession._matches(sent, expected)
+
+    @staticmethod
+    def redeem(request: Request, submitted: str) -> None:
+        now = time.monotonic()
+        recent = [stamp for stamp in request.app.state.pairing_failures if now - stamp < UiSession.WINDOW_SECONDS]
+        request.app.state.pairing_failures = recent
+        if len(recent) >= UiSession.MAX_FAILURES:
+            raise Problem(429, "pairing_rate_limited", "Too many attempts. Wait a minute and try again.")
+        normalized = UiSession.normalize_code(submitted)
+        if not UiSession._matches(normalized, request.app.state.pairing_code):
+            request.app.state.pairing_failures.append(now)
+            raise Problem(403, "pairing_rejected", "That pairing code was not accepted.")
+
+    @staticmethod
+    def accept(request: Request) -> None:
+        if not UiSession.paired(request):
             raise Problem(
                 403,
                 "ui_session_required",
