@@ -6,6 +6,7 @@ TAFO keeps one list across work, home, and personal. **Work / Life / All are vie
 
 ## What you can do
 
+- Open **Plan** (the default tab) on a dark week grid. Unscheduled tasks sit on the left with an age chip. Drag one onto a day to schedule it, then drag or resize the block. A checkbox marks the linked task done. Click a block for the time, duration, and remove confirmation. Your own drags, resizes, and removes are approved immediately; that default is shown in Settings and can be turned off with `TAFO_HUMAN_EDITS_AUTO_APPROVE=0`. Agent proposals stay pending until you approve or deny them on the grid.
 - Add tasks with a domain, status (`todo`, `doing`, `waiting`, `done`), an hour estimate, a due date, notes, and a short checklist. Edit the title and notes afterward; the save sends the version you loaded, and a conflict asks you to reload. Delete a task or a checklist item from the card after a short confirm. Deleting a task also cancels its scheduled calendar blocks.
 - Split the list into **Today** and **Backlog**, and order each view by hand.
 - Run one timer at a time and see tracked time next to the estimate.
@@ -91,16 +92,101 @@ These calls are for a person or a cooperative agent on loopback. Send no `X-TAFO
 
 404 means the task is missing, or a move target is not in that view. The OpenAPI page at `/docs` repeats these descriptions.
 
+## Plan the day
+
+Plan is the human path for the week. It reads tasks, blocks, and proposals that already exist. Every block change is still a proposal, then an approval. There is no separate calendar write API.
+
+Quick-add is `POST /api/tasks`. Completing a block is `PATCH /api/tasks/{id}` with `expected_version`. Scheduling, moving, resizing, and removing go through `POST /api/hermes/proposals` (`calendar_block`, `calendar_update`, or `calendar_cancel`, `source_kind: human`) and then the decision route when "My own edits: approved right away" is on. The page sends `X-TAFO-Actor: human` on those decision calls. Omitting that header is not treated as a person.
+
+## Approval trust boundary
+
+`GET /api/meta` sets an HttpOnly `SameSite=Strict` cookie when the request sends `Sec-Fetch-Site: same-origin`. Headed Chrome does that on a same-origin GET and does not send `Origin`. The JSON body does not contain the secret. Approve, deny, and proposal edit require that cookie and an explicit `X-TAFO-Actor: human`. A missing actor header is not a person. `X-TAFO-Actor: agent` is 403 even if the cookie is attached.
+
+Approvals by agents are deterred, not prevented. A normal API client that does not send `Sec-Fetch-Site` gets no cookie and cannot approve. Any local process that forges browser headers can obtain the cookie and approve. Mike relies on instructing his bots not to.
+
+Keys, with focus outside a text field: `T` today, `W` week, `D` day, `←` `→` move the range (or move a focused block by a day), `↑` `↓` move a focused block 15 minutes, `N` focuses quick-add, `/` focuses find, `A` approves the focused proposal, `X` denies it, `Space` toggles done, `Esc` closes, `Ctrl+Z` undoes the last grid change for 8 seconds.
+
+## Review the Slice 1 journey
+
+Check out this revision from a clean worktree. If `git status --porcelain` prints anything, stop and keep those changes. The commands below use `git switch --detach`. Leave the worktree as it is and do not run `git reset --hard`.
+
+Bash:
+
+```bash
+if [ -n "$(git status --porcelain)" ]; then
+  echo "Worktree is dirty. Keep those changes. Do not run git reset --hard." >&2
+  exit 1
+fi
+git fetch origin cursor/tafo-slice1-plan-c2be
+git switch --detach origin/cursor/tafo-slice1-plan-c2be
+python3 -m venv .venv
+.venv/bin/python -m pip install -e "backend[dev]"
+(cd frontend && npm install)
+```
+
+PowerShell:
+
+```powershell
+if (git status --porcelain) {
+  Write-Warning "Worktree is dirty. Keep those changes. Do not run git reset --hard."
+  exit 1
+}
+git fetch origin cursor/tafo-slice1-plan-c2be
+git switch --detach origin/cursor/tafo-slice1-plan-c2be
+py -3 -m venv .venv
+.\.venv\Scripts\python -m pip install -e ".\backend[dev]"
+Push-Location frontend
+npm install
+Pop-Location
+```
+
+Create the throwaway database environment before the first launch, then load the review fixture into that path. `scripts/load_demo_fixture.py` writes the hike task, the fixed "Hold the ladder" block, the other journey tasks, and the pending agent proposals. It refuses `data/tafo.sqlite` and does not use the generic sample seed. For this review, leave `start.sh` and `start.ps1` unused and keep `TAFO_DB_PATH` on the temp file.
+
+Bash, in one shell so the variables survive a restart:
+
+```bash
+export TAFO_TEST_DIR="$(mktemp -d -t tafo-preview-XXXX)"
+export TAFO_DATA_DIR="$TAFO_TEST_DIR"
+export TAFO_DB_PATH="$TAFO_TEST_DIR/tafo.sqlite"
+export TAFO_CALENDAR_MODE=demo
+export TAFO_SEED_DEMO=0
+export TAFO_DISPLAY_TIMEZONE=America/Indianapolis
+export TAFO_HOST=127.0.0.1
+export TAFO_PORT=8787
+.venv/bin/python scripts/load_demo_fixture.py "$TAFO_DB_PATH"
+.venv/bin/python -m tafo
+```
+
+PowerShell, in one window:
+
+```powershell
+$env:TAFO_TEST_DIR = Join-Path $env:TEMP ("tafo-preview-" + [guid]::NewGuid().ToString("N"))
+New-Item -ItemType Directory -Path $env:TAFO_TEST_DIR | Out-Null
+$env:TAFO_DATA_DIR = $env:TAFO_TEST_DIR
+$env:TAFO_DB_PATH = Join-Path $env:TAFO_TEST_DIR "tafo.sqlite"
+$env:TAFO_CALENDAR_MODE = "demo"
+$env:TAFO_SEED_DEMO = "0"
+$env:TAFO_DISPLAY_TIMEZONE = "America/Indianapolis"
+$env:TAFO_HOST = "127.0.0.1"
+$env:TAFO_PORT = "8787"
+.\.venv\Scripts\python scripts\load_demo_fixture.py $env:TAFO_DB_PATH
+.\.venv\Scripts\python -m tafo
+```
+
+In another terminal, `cd frontend && npm run dev`, then open `http://127.0.0.1:5173`. The footer `data-rev` is the git revision the page was built from. Demo calendar writes are simulated and are not sent to Google.
+
+To reproduce the offline step, stop the API and start it again in the same shell. The exports above stay in place, so the restart opens the same temp database. Do not create a second temp directory.
+
 ## Hermes inbox
 
-`GET /api/hermes/contract` and the OpenAPI description are the contract.
+`GET /api/hermes/contract` and the OpenAPI description are the contract. They do not describe the local page session.
 
 - Agents `POST /api/hermes/proposals` with `X-TAFO-Actor: agent` and an `idempotency_key`.
-- That call does not change tasks or blocks.
-- A person approves, edits, or rejects at `/api/decisions/{id}/...` with `confirmed: true`.
+- That call does not change tasks or blocks. `calendar_block`, `calendar_update`, `calendar_cancel`, and `task_change` all stay pending.
+- Approve, edit, and reject are only for the local Plan page. See "Approval trust boundary" above. An agent header, a missing actor header, or a call without the browser session gets **403** and the proposal stays as it was.
 - The same paths under `/api/hermes/...` return 403.
 - Requests that send `X-TAFO-Actor: agent` cannot patch tasks, run timers, edit the week, approve, or restore a backup.
-- This header is an integration rule for cooperative agents, not authentication. Omitting it, or sending `human`, does not prove who the caller is. Anything that can reach the loopback port can mutate data.
+- This header is an integration rule for cooperative agents, not authentication. Anything that can reach the loopback port can still submit proposals.
 
 Approving a calendar proposal inserts one outbox row. A second approval returns that row. `POST /api/calendar/outbox/{id}/retry` processes it again with the same event key.
 
@@ -123,8 +209,14 @@ npm run build
 
 Covered: task CRUD and filters, timers, weekly bullets, approval gates, optimistic concurrency, duplicate outbox and retry, demo versus live (including no network in demo and fail-closed live), mirror dedupe, fixed appointments, backup, migrations, and the deferred manager response.
 
+## Future
+
+- Phone QR-code approver auth, so Mike or Jeff can scan to authenticate who approves or makes changes.
+
 ## Known gaps
 
+- Plan's Settings list is read-only. Coming-week and work/home rules are not enforced yet. Denying a proposal does not suggest another time.
+- Calendar writes in this build are demo simulations. It has not been tested on Windows, and it has not been tested against a live Google calendar.
 - No accounts, and no manager view. A role header or `?role=manager` does not hide personal tasks.
 - One active timer, up/down ordering rather than drag and drop, no comments, no PERT, no cost model.
 - No background worker. The outbox runs on approve and on retry.

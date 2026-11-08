@@ -59,6 +59,7 @@ from tafo.tasks import (
 from datetime import timedelta
 
 from tafo.timeutil import parse_utc, utc_now
+from tafo.ui_session import UiSession
 from tafo.week import get_week, regenerate_week, save_week
 
 DESCRIPTION = """
@@ -126,6 +127,20 @@ def _require_confirmed(confirmed: bool) -> None:
         raise Problem(400, "confirmation_required", "Set confirmed true. Nothing was changed.")
 
 
+def _require_decision(request: Request) -> str:
+    """Approve, deny, and edit. A missing actor is not a person, and a header is not a session."""
+    raw = request.headers.get("x-tafo-actor")
+    if raw is None or not raw.strip():
+        raise Problem(
+            403,
+            "ui_session_required",
+            "Approve, deny, and edit are only accepted from the local UI session.",
+        )
+    _require_human(request)
+    UiSession.accept(request)
+    return "human"
+
+
 def _finish(settings: Settings, adapter: CalendarAdapter, staged: dict) -> dict:
     outbox = None
     block = None
@@ -152,6 +167,7 @@ def create_app(settings: Settings | None = None, adapter: CalendarAdapter | None
     settings.validate()
     if adapter is None:
         adapter = build_adapter(settings)
+    ui_session_token = UiSession.mint()
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
@@ -175,6 +191,7 @@ def create_app(settings: Settings | None = None, adapter: CalendarAdapter | None
     )
     app.state.settings = settings
     app.state.adapter = adapter
+    app.state.ui_session_token = ui_session_token
     app.add_middleware(
         CORSMiddleware,
         allow_origins=[
@@ -200,6 +217,13 @@ def create_app(settings: Settings | None = None, adapter: CalendarAdapter | None
                 },
             )
         return await call_next(request)
+
+    @app.middleware("http")
+    async def issue_ui_cookie(request: Request, call_next):
+        response = await call_next(request)
+        if response.status_code == 200 and UiSession.should_issue(request):
+            response.headers.append("set-cookie", UiSession.cookie_header(request.app.state.ui_session_token))
+        return response
 
     @app.exception_handler(Problem)
     async def problem_handler(_request: Request, exc: Problem) -> JSONResponse:
@@ -234,6 +258,7 @@ def create_app(settings: Settings | None = None, adapter: CalendarAdapter | None
             "outlook_gap": OUTLOOK_GAP,
             "notices": NOTICES,
             "filter_note": "Work, Life, and All are view filters. They are not a security boundary.",
+            "human_edits_auto_approve": settings.human_edits_auto_approve,
         }
 
     @app.get("/api/hermes/contract", tags=["hermes"])
@@ -435,7 +460,7 @@ def create_app(settings: Settings | None = None, adapter: CalendarAdapter | None
 
     @app.post("/api/decisions/{proposal_id}/approve", tags=["decisions"])
     def post_approve(proposal_id: str, body: DecisionBody, request: Request) -> dict:
-        _require_human(request)
+        _require_decision(request)
         _require_confirmed(body.confirmed)
         with session(settings.db_path) as conn:
             staged = stage_approval(
@@ -452,7 +477,7 @@ def create_app(settings: Settings | None = None, adapter: CalendarAdapter | None
 
     @app.post("/api/decisions/{proposal_id}/edit", tags=["decisions"])
     def post_edit(proposal_id: str, body: EditBody, request: Request) -> dict:
-        _require_human(request)
+        _require_decision(request)
         _require_confirmed(body.confirmed)
         return edit_proposal(
             settings,
@@ -465,7 +490,7 @@ def create_app(settings: Settings | None = None, adapter: CalendarAdapter | None
 
     @app.post("/api/decisions/{proposal_id}/reject", tags=["decisions"])
     def post_reject(proposal_id: str, body: DecisionBody, request: Request) -> dict:
-        _require_human(request)
+        _require_decision(request)
         _require_confirmed(body.confirmed)
         with session(settings.db_path) as conn:
             return reject_proposal(

@@ -46,6 +46,7 @@ class Settings:
     work_invite_email: str
     allow_lan: bool
     seed_demo: bool
+    human_edits_auto_approve: bool = True
 
     @classmethod
     def from_env(cls) -> Settings:
@@ -65,6 +66,7 @@ class Settings:
             work_invite_email=os.environ.get("TAFO_WORK_INVITE_EMAIL", "").strip(),
             allow_lan=_flag(os.environ.get("TAFO_ALLOW_LAN"), False),
             seed_demo=_flag(os.environ.get("TAFO_SEED_DEMO"), True),
+            human_edits_auto_approve=_flag(os.environ.get("TAFO_HUMAN_EDITS_AUTO_APPROVE"), True),
         )
 
     def validate(self) -> None:

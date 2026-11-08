@@ -46,9 +46,12 @@ export async function api<T>(path: string, options: RequestInit = {}): Promise<T
   if (options.body && !headers.has("Content-Type")) {
     headers.set("Content-Type", "application/json");
   }
+  if (path.startsWith("/api/decisions/") && !headers.has("X-TAFO-Actor")) {
+    headers.set("X-TAFO-Actor", "human");
+  }
   let response: Response;
   try {
-    response = await fetch(path, { ...options, headers });
+    response = await fetch(path, { ...options, headers, credentials: "same-origin" });
   } catch {
     throw new ApiError(OFFLINE_MESSAGE, { offline: true });
   }

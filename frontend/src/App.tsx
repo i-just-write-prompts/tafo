@@ -1,9 +1,13 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { OFFLINE_MESSAGE, api, formatWhen } from "./api";
 import { CalendarPanel } from "./components/CalendarPanel";
 import { Inbox } from "./components/Inbox";
 import { TaskBoard } from "./components/TaskBoard";
 import { WeekPanel } from "./components/WeekPanel";
+import { PlanSkeleton } from "./plan/CalendarGrid";
+import { PlanView } from "./plan/PlanView";
+import { SyncStatus } from "./plan/sync";
+import { TAFO_REV } from "./rev";
 import type {
   AuditEntry,
   Availability,
@@ -21,17 +25,27 @@ import type {
 function Compass() {
   return (
     <svg className="compass" viewBox="0 0 64 64" aria-hidden="true">
-      <circle cx="32" cy="32" r="22" fill="#1f4a3a" />
-      <circle cx="32" cy="32" r="14" fill="none" stroke="#f4efe4" strokeWidth="2" />
-      <path d="M32 16 L36 32 L32 48 L28 32 Z" fill="#e4b15c" />
-      <circle cx="32" cy="32" r="2.5" fill="#f4efe4" />
+      <circle cx="32" cy="32" r="22" fill="#1c1c21" />
+      <circle cx="32" cy="32" r="14" fill="none" stroke="#eceae4" strokeWidth="2" />
+      <path d="M32 16 L36 32 L32 48 L28 32 Z" fill="#e6b15a" />
+      <circle cx="32" cy="32" r="2.5" fill="#eceae4" />
     </svg>
+  );
+}
+
+function OfflinePanel({ onRetry }: { onRetry: () => void }) {
+  return (
+    <div className="offline-panel" role="alert" data-testid="offline-banner">
+      <h2>Offline</h2>
+      <p>{OFFLINE_MESSAGE}</p>
+      <button type="button" data-testid="retry-load" onClick={onRetry}>Retry</button>
+    </div>
   );
 }
 
 export function App() {
   const [meta, setMeta] = useState<Meta | null>(null);
-  const [tab, setTab] = useState<Tab>("today");
+  const [tab, setTab] = useState<Tab>("plan");
   const [view, setView] = useState<View>("all");
   const [tasks, setTasks] = useState<Task[]>([]);
   const [proposals, setProposals] = useState<Proposal[]>([]);
@@ -44,6 +58,7 @@ export function App() {
   const [error, setError] = useState<string | null>(null);
   const [offline, setOffline] = useState(false);
   const [now, setNow] = useState(Date.now());
+  const refreshRef = useRef<() => Promise<void>>(async () => undefined);
 
   function raise(message: string) {
     setError(message);
@@ -81,9 +96,19 @@ export function App() {
     }
   }
 
+  refreshRef.current = refresh;
+
   useEffect(() => {
     refresh().catch(() => undefined);
   }, [tab, view]);
+
+  useEffect(() => {
+    if (tab !== "plan" || offline) return undefined;
+    const timer = window.setInterval(() => {
+      refreshRef.current().catch(() => undefined);
+    }, 4000);
+    return () => window.clearInterval(timer);
+  }, [tab, offline]);
 
   useEffect(() => {
     if (!active) return undefined;
@@ -93,93 +118,133 @@ export function App() {
 
   const pending = proposals.filter((item) => item.status === "pending").length;
   const elapsed = active ? Math.max(0, Math.round((now - new Date(active.started_at).getTime()) / 1000)) : 0;
+  const chip = SyncStatus.label({
+    offline,
+    calendarMode: meta?.calendar_mode ?? "demo",
+    operations,
+  });
 
   return (
     <div className="app">
       <header className="topbar">
         <div className="brand">
           <Compass />
-          <div>
-            <h1>TAFO</h1>
-            <p>Task around & find out</p>
-          </div>
+          <h1>TAFO</h1>
+          <p>Task around & find out</p>
         </div>
-        {meta && (
-          <div className="pills">
-            <span className="pill">{meta.display_timezone}</span>
-            <span className={meta.calendar_mode === "demo" ? "pill pill-demo" : "pill pill-live"} data-testid="mode-banner">
-              {meta.sync_label}
-            </span>
-          </div>
-        )}
+        <nav className="tabs" aria-label="Sections">
+          {([
+            ["plan", "Plan"],
+            ["today", "Today"],
+            ["backlog", "Backlog"],
+            ["inbox", `Inbox (${pending})`],
+            ["calendar", "Calendar"],
+            ["week", "Week"],
+          ] as const).map(([id, label]) => (
+            <button
+              key={id}
+              className={tab === id ? "tab active" : "tab"}
+              type="button"
+              aria-current={tab === id ? "page" : undefined}
+              onClick={() => {
+                if (id === tab) {
+                  refresh().catch(() => undefined);
+                  return;
+                }
+                setTab(id);
+              }}
+            >
+              {label}
+            </button>
+          ))}
+        </nav>
+        <div className="pills">
+          {meta && <span className="pill">{meta.display_timezone}</span>}
+          {meta && <span hidden data-testid="mode-banner">{meta.sync_label}</span>}
+          <span className={offline ? "pill pill-offline" : meta?.calendar_mode === "demo" ? "pill pill-demo" : "pill pill-live"} data-testid="sync-chip" title={meta?.sync_label ?? ""}>
+            {chip}
+          </span>
+        </div>
       </header>
       {meta && (
-        <p className="gap-banner" data-testid="outlook-gap">
+        <p className="gap-banner" data-testid="outlook-gap" title={meta.outlook_gap}>
           <strong>Not conflict-free. </strong>
           {meta.outlook_gap}
         </p>
       )}
-      {error && (
-        <div className="error-banner" role="alert" data-testid={offline ? "offline-banner" : "app-error"}>
-          <p>{error}</p>
-          {offline && (
-            <button type="button" data-testid="retry-load" onClick={() => { refresh().catch(() => undefined); }}>
-              Retry
-            </button>
-          )}
-        </div>
-      )}
-      <nav className="tabs">
-        {([
-          ["today", "Today"],
-          ["backlog", "Backlog"],
-          ["inbox", `Inbox (${pending})`],
-          ["calendar", "Calendar"],
-          ["week", "Week"],
-        ] as const).map(([id, label]) => (
-          <button key={id} className={tab === id ? "tab active" : "tab"} type="button" onClick={() => { if (id === tab) { refresh().catch(() => undefined); return; } setTab(id); }}>
-            {label}
-          </button>
-        ))}
-      </nav>
-      {meta && (tab === "today" || tab === "backlog") && (
-        <TaskBoard
-          tasks={tasks}
-          meta={meta}
-          view={view}
-          scope={tab}
-          onView={setView}
-          onRefresh={refresh}
-          onError={raise}
-          onProposed={() => setTab("inbox")}
-        />
-      )}
-      {meta && tab === "inbox" && (
-        <Inbox proposals={proposals} tasks={tasks} meta={meta} onRefresh={refresh} onError={raise} onApproved={() => setTab("calendar")} />
-      )}
-      {meta && tab === "calendar" && (
-        <CalendarPanel
-          meta={meta}
-          blocks={blocks}
-          operations={operations}
-          availability={availability}
-          audit={audit}
-          onRefresh={refresh}
-          onError={raise}
-        />
-      )}
-      {tab === "week" && <WeekPanel week={week} onRefresh={refresh} onError={raise} />}
-      {meta && (
-        <footer className="footer">
-          <p>{meta.notices[0]} {meta.notices[1]}</p>
+      <div className="workspace">
+        {offline ? (
+          <OfflinePanel onRetry={() => { refresh().catch(() => undefined); }} />
+        ) : (
+          <>
+            {error && (
+              <div className="error-banner" role="alert" data-testid="app-error">
+                <p>{error}</p>
+              </div>
+            )}
+            {tab === "plan" && !meta && <PlanSkeleton />}
+            {meta && tab === "plan" && (
+              <PlanView
+                meta={meta}
+                tasks={tasks}
+                blocks={blocks}
+                proposals={proposals}
+                onRefresh={refresh}
+                onError={raise}
+              />
+            )}
+            {meta && (tab === "today" || tab === "backlog") && (
+              <div className="tab-scroll">
+                <TaskBoard
+                  tasks={tasks}
+                  meta={meta}
+                  view={view}
+                  scope={tab}
+                  onView={setView}
+                  onRefresh={refresh}
+                  onError={raise}
+                  onProposed={() => setTab("inbox")}
+                />
+              </div>
+            )}
+            {meta && tab === "inbox" && (
+              <div className="tab-scroll">
+                <Inbox proposals={proposals} tasks={tasks} meta={meta} onRefresh={refresh} onError={raise} onApproved={() => setTab("calendar")} />
+              </div>
+            )}
+            {meta && tab === "calendar" && (
+              <div className="tab-scroll">
+                <CalendarPanel
+                  meta={meta}
+                  blocks={blocks}
+                  operations={operations}
+                  availability={availability}
+                  audit={audit}
+                  onRefresh={refresh}
+                  onError={raise}
+                />
+              </div>
+            )}
+            {tab === "week" && (
+              <div className="tab-scroll">
+                <WeekPanel week={week} onRefresh={refresh} onError={raise} />
+              </div>
+            )}
+          </>
+        )}
+      </div>
+      <footer className="footer" data-rev={TAFO_REV}>
+        <span className="rev" data-testid="build-rev">{TAFO_REV}</span>
+        {meta && <p className="footer-note">{meta.notices[0]}</p>}
+        {meta && (
           <details>
             <summary>Privacy notes</summary>
             {meta.notices.map((notice) => (
               <p key={notice}>{notice}</p>
             ))}
           </details>
-        </footer>
-      )}
+        )}
+      </footer>
       {active && meta && (
         <div className="timerbar">
           <div>
