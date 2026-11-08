@@ -106,16 +106,76 @@ Approvals by agents are deterred, not prevented. A normal API client that does n
 
 Keys, with focus outside a text field: `T` today, `W` week, `D` day, `←` `→` move the range (or move a focused block by a day), `↑` `↓` move a focused block 15 minutes, `N` focuses quick-add, `/` focuses find, `A` approves the focused proposal, `X` denies it, `Space` toggles done, `Esc` closes, `Ctrl+Z` undoes the last grid change for 8 seconds.
 
-Run this against a throwaway database. Do not use `start.sh` or `start.ps1`, and do not point `TAFO_DB_PATH` at `data/tafo.sqlite`.
+## Review the Slice 1 journey
+
+Check out this revision from a clean worktree. If `git status --porcelain` prints anything, stop and keep those changes. The commands below use `git switch --detach`. Leave the worktree as it is and do not run `git reset --hard`.
+
+Bash:
+
+```bash
+if [ -n "$(git status --porcelain)" ]; then
+  echo "Worktree is dirty. Keep those changes. Do not run git reset --hard." >&2
+  exit 1
+fi
+git fetch origin cursor/tafo-slice1-plan-c2be
+git switch --detach origin/cursor/tafo-slice1-plan-c2be
+python3 -m venv .venv
+.venv/bin/python -m pip install -e "backend[dev]"
+(cd frontend && npm install)
+```
+
+PowerShell:
+
+```powershell
+if (git status --porcelain) {
+  Write-Warning "Worktree is dirty. Keep those changes. Do not run git reset --hard."
+  exit 1
+}
+git fetch origin cursor/tafo-slice1-plan-c2be
+git switch --detach origin/cursor/tafo-slice1-plan-c2be
+py -3 -m venv .venv
+.\.venv\Scripts\python -m pip install -e ".\backend[dev]"
+Push-Location frontend
+npm install
+Pop-Location
+```
+
+Create the throwaway database environment before the first launch, then load the review fixture into that path. `scripts/load_demo_fixture.py` writes the hike task, the fixed "Hold the ladder" block, the other journey tasks, and the pending agent proposals. It refuses `data/tafo.sqlite` and does not use the generic sample seed. For this review, leave `start.sh` and `start.ps1` unused and keep `TAFO_DB_PATH` on the temp file.
+
+Bash, in one shell so the variables survive a restart:
 
 ```bash
 export TAFO_TEST_DIR="$(mktemp -d -t tafo-preview-XXXX)"
-TAFO_DATA_DIR="$TAFO_TEST_DIR" TAFO_DB_PATH="$TAFO_TEST_DIR/tafo.sqlite" \
-TAFO_CALENDAR_MODE=demo TAFO_SEED_DEMO=0 TAFO_DISPLAY_TIMEZONE=America/Indianapolis \
-TAFO_HOST=127.0.0.1 TAFO_PORT=8787 .venv/bin/python -m tafo
+export TAFO_DATA_DIR="$TAFO_TEST_DIR"
+export TAFO_DB_PATH="$TAFO_TEST_DIR/tafo.sqlite"
+export TAFO_CALENDAR_MODE=demo
+export TAFO_SEED_DEMO=0
+export TAFO_DISPLAY_TIMEZONE=America/Indianapolis
+export TAFO_HOST=127.0.0.1
+export TAFO_PORT=8787
+.venv/bin/python scripts/load_demo_fixture.py "$TAFO_DB_PATH"
+.venv/bin/python -m tafo
+```
+
+PowerShell, in one window:
+
+```powershell
+$env:TAFO_TEST_DIR = Join-Path $env:TEMP ("tafo-preview-" + [guid]::NewGuid().ToString("N"))
+New-Item -ItemType Directory -Path $env:TAFO_TEST_DIR | Out-Null
+$env:TAFO_DATA_DIR = $env:TAFO_TEST_DIR
+$env:TAFO_DB_PATH = Join-Path $env:TAFO_TEST_DIR "tafo.sqlite"
+$env:TAFO_CALENDAR_MODE = "demo"
+$env:TAFO_SEED_DEMO = "0"
+$env:TAFO_DISPLAY_TIMEZONE = "America/Indianapolis"
+$env:TAFO_HOST = "127.0.0.1"
+$env:TAFO_PORT = "8787"
+.\.venv\Scripts\python scripts\load_demo_fixture.py $env:TAFO_DB_PATH
+.\.venv\Scripts\python -m tafo
 ```
 
 In another terminal, `cd frontend && npm run dev`, then open `http://127.0.0.1:5173`. The footer `data-rev` is the git revision the page was built from. Demo calendar writes are simulated and are not sent to Google.
+
+To reproduce the offline step, stop the API and start it again in the same shell. The exports above stay in place, so the restart opens the same temp database. Do not create a second temp directory.
 
 ## Hermes inbox
 
