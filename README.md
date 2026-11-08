@@ -13,4 +13,8 @@ The app was the isolated demo fixture, `TAFO_ALLOW_LAN=0`, America/Indianapolis.
 | `proposals.png` | Approve and Deny crowded into the portrait columns. |
 | `fixed-confirm.png` | The fixed-block confirm, with Change it and Cancel. |
 | `offline.png` | Offline — 3 unsynced, with Retry. |
+| `undo-toast.png` | The toast after scheduling the hike, with Undo. |
+| `agent-move.png` | Grandma's old block marked Was, connected to the proposed 11:00 block. |
+| `approve-day.png` | Wednesday day view with Approve day (2). |
+| `done-block.png` | The hike block checked off. |
 | `journey-3f7afb3.mp4` | Headed-Chrome journey recorded at this revision. The footer shows `3f7afb3afbda066f89a9c2265f25ee2fbd89175a`. A drag schedules the hike, moves it to Wednesday 14:00, and resizes it to 14:45. |
