@@ -222,6 +222,12 @@ npm run e2e
 
 Covered: task CRUD and filters, timers, weekly bullets, approval gates, optimistic concurrency, duplicate outbox and retry, demo versus live (including no network in demo and fail-closed live), mirror dedupe, fixed appointments, backup, migrations, and the deferred manager response.
 
+## Fly preview
+
+The image in `Dockerfile` is a public review app, not a production deploy. FastAPI serves `frontend/dist` and `/api` on one origin. `TAFO_PREVIEW=1` forces demo calendar mode, drops Google credentials and the work invite address, and reloads the Slice 1 fixture into `/tmp` every time the process starts. There is no volume. There is no authentication, so anyone with the URL can use it. `.dockerignore` excludes `.env` and `data/`.
+
+`.github/workflows/fly-preview.yml` checks for the `FLY_API_TOKEN` repository secret and skips the deploy when that secret is absent. `fly.toml` stops the machine when it is idle (`auto_stop_machines = "stop"`).
+
 ## Future
 
 - Phone QR-code approver auth, so Mike or Jeff can scan to authenticate who approves or makes changes.

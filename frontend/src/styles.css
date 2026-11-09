@@ -74,6 +74,16 @@ h1, h2, h3, p { margin: 0; }
 .pill-demo, .pill-live, .pill-offline { white-space: nowrap; }
 .pill-offline { border-color: var(--bad); color: var(--bad); }
 
+.preview-banner {
+  border-radius: 8px;
+  padding: 8px 10px;
+  background: #3a2a12;
+  border: 1px solid var(--accent);
+  color: var(--ink);
+  font-size: 14px;
+  line-height: 1.35;
+  flex: none;
+}
 .gap-banner, .error-banner {
   border-radius: 8px;
   padding: 4px 8px;

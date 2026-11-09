@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -47,12 +48,31 @@ class Settings:
     allow_lan: bool
     seed_demo: bool
     human_edits_auto_approve: bool = True
+    preview: bool = False
+    static_dir: str = ""
 
     @classmethod
     def from_env(cls) -> Settings:
-        data_dir = Path(os.environ.get("TAFO_DATA_DIR", "./data")).expanduser()
+        preview = _flag(os.environ.get("TAFO_PREVIEW"), False)
+        data_raw = os.environ.get("TAFO_DATA_DIR", "").strip()
         db_raw = os.environ.get("TAFO_DB_PATH", "").strip()
+        if preview and not data_raw and not db_raw:
+            data_dir = Path(tempfile.gettempdir()) / "tafo-preview"
+        else:
+            data_dir = Path(data_raw or "./data").expanduser()
         db_path = Path(db_raw).expanduser() if db_raw else data_dir / "tafo.sqlite"
+        calendar_mode = (os.environ.get("TAFO_CALENDAR_MODE", "demo").strip().lower() or "demo")
+        google_credentials_file = os.environ.get("TAFO_GOOGLE_CREDENTIALS_FILE", "").strip()
+        google_calendar_id = os.environ.get("TAFO_GOOGLE_CALENDAR_ID", "").strip()
+        work_invite_email = os.environ.get("TAFO_WORK_INVITE_EMAIL", "").strip()
+        seed_demo = _flag(os.environ.get("TAFO_SEED_DEMO"), True)
+        if preview:
+            # A review app is public. Demo data only, and ignore any credential that leaked in.
+            calendar_mode = "demo"
+            google_credentials_file = ""
+            google_calendar_id = ""
+            work_invite_email = ""
+            seed_demo = False
         return cls(
             host=os.environ.get("TAFO_HOST", "127.0.0.1").strip() or "127.0.0.1",
             port=int(os.environ.get("TAFO_PORT", "8787")),
@@ -60,13 +80,15 @@ class Settings:
             db_path=db_path,
             display_timezone=os.environ.get("TAFO_DISPLAY_TIMEZONE", "America/Indianapolis").strip()
             or "America/Indianapolis",
-            calendar_mode=(os.environ.get("TAFO_CALENDAR_MODE", "demo").strip().lower() or "demo"),
-            google_credentials_file=os.environ.get("TAFO_GOOGLE_CREDENTIALS_FILE", "").strip(),
-            google_calendar_id=os.environ.get("TAFO_GOOGLE_CALENDAR_ID", "").strip(),
-            work_invite_email=os.environ.get("TAFO_WORK_INVITE_EMAIL", "").strip(),
+            calendar_mode=calendar_mode,
+            google_credentials_file=google_credentials_file,
+            google_calendar_id=google_calendar_id,
+            work_invite_email=work_invite_email,
             allow_lan=_flag(os.environ.get("TAFO_ALLOW_LAN"), False),
-            seed_demo=_flag(os.environ.get("TAFO_SEED_DEMO"), True),
+            seed_demo=seed_demo,
             human_edits_auto_approve=_flag(os.environ.get("TAFO_HUMAN_EDITS_AUTO_APPROVE"), True),
+            preview=preview,
+            static_dir=os.environ.get("TAFO_SERVE_STATIC_DIR", "").strip(),
         )
 
     def validate(self) -> None:
@@ -83,6 +105,13 @@ class Settings:
             raise RuntimeError(f"Invalid TAFO_DISPLAY_TIMEZONE: {self.display_timezone}") from exc
         if self.port < 1 or self.port > 65535:
             raise RuntimeError("TAFO_PORT is out of range.")
+        if self.preview:
+            if self.calendar_mode != "demo":
+                raise RuntimeError("Preview mode only runs with TAFO_CALENDAR_MODE=demo.")
+            if self.google_credentials_file or self.google_calendar_id or self.work_invite_email:
+                raise RuntimeError("Preview mode refuses Google credentials and invite addresses.")
+            if self.seed_demo:
+                raise RuntimeError("Preview mode does not load the generic sample seed.")
 
     @property
     def google_configured(self) -> bool:

@@ -1,0 +1,23 @@
+# Keep secrets and the real database out of the image.
+.env
+.env.*
+data
+**/.env
+credentials.json
+token.json
+*.pem
+*.sqlite
+*.sqlite3
+
+.git
+.venv
+venv
+**/__pycache__
+**/*.py[cod]
+frontend/node_modules
+**/node_modules
+frontend/dist
+playwright-report
+test-results
+review-screenshots
+.e2e-tmp

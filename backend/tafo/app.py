@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -59,6 +60,7 @@ from tafo.tasks import (
 from datetime import timedelta
 
 from tafo.timeutil import parse_utc, utc_now
+from tafo.preview import PREVIEW_BANNER, mount_preview_ui, reseed_preview
 from tafo.ui_session import UiSession
 from tafo.week import get_week, regenerate_week, save_week
 
@@ -171,6 +173,9 @@ def create_app(settings: Settings | None = None, adapter: CalendarAdapter | None
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
+        if settings.preview:
+            reseed_preview(settings)
+            print("TAFO preview: demo fixture on an ephemeral database. Google is disabled. This API has no authentication.")
         init_db(settings, adapter)
         if settings.calendar_mode == "demo":
             print("TAFO calendar mode: demo. Blocks are simulated and NOT synced to Google.")
@@ -259,6 +264,8 @@ def create_app(settings: Settings | None = None, adapter: CalendarAdapter | None
             "notices": NOTICES,
             "filter_note": "Work, Life, and All are view filters. They are not a security boundary.",
             "human_edits_auto_approve": settings.human_edits_auto_approve,
+            "preview": settings.preview,
+            "preview_banner": PREVIEW_BANNER if settings.preview else "",
         }
 
     @app.get("/api/hermes/contract", tags=["hermes"])
@@ -583,5 +590,8 @@ def create_app(settings: Settings | None = None, adapter: CalendarAdapter | None
             "Manager access is not implemented. A Work/Life switch is only a view filter and is not "
             "an authorization boundary. No work-only manager view is available.",
         )
+
+    if settings.static_dir:
+        mount_preview_ui(app, Path(settings.static_dir))
 
     return app

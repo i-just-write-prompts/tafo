@@ -1,0 +1,37 @@
+# Review-app config. The GitHub workflow does not deploy until FLY_API_TOKEN exists.
+# superfly/fly-pr-review-apps names the running app pr-<number>-i-just-write-prompts-tafo.
+
+app = "tafo-preview"
+primary_region = "iad"
+
+[build]
+  dockerfile = "Dockerfile"
+
+[env]
+  TAFO_PREVIEW = "1"
+  TAFO_HOST = "0.0.0.0"
+  TAFO_PORT = "8080"
+  TAFO_ALLOW_LAN = "1"
+  TAFO_CALENDAR_MODE = "demo"
+  TAFO_SEED_DEMO = "0"
+  TAFO_DATA_DIR = "/tmp/tafo"
+  TAFO_DB_PATH = "/tmp/tafo/tafo.sqlite"
+  TAFO_DISPLAY_TIMEZONE = "America/Indianapolis"
+  TAFO_SERVE_STATIC_DIR = "/app/frontend/dist"
+  TAFO_FIXTURE_SCRIPT = "/app/scripts/load_demo_fixture.py"
+  TAFO_GOOGLE_CREDENTIALS_FILE = ""
+  TAFO_GOOGLE_CALENDAR_ID = ""
+  TAFO_WORK_INVITE_EMAIL = ""
+  TAFO_HUMAN_EDITS_AUTO_APPROVE = "1"
+
+[http_service]
+  internal_port = 8080
+  force_https = true
+  auto_stop_machines = "stop"
+  auto_start_machines = true
+  min_machines_running = 0
+
+[[vm]]
+  cpu_kind = "shared"
+  cpus = 1
+  memory = "512mb"

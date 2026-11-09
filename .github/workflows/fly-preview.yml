@@ -1,0 +1,46 @@
+# Ready, not deployed. This job skips itself until the repository secret
+# FLY_API_TOKEN exists. It never sets Google credentials.
+
+name: Fly preview
+
+on:
+  pull_request:
+    types: [opened, reopened, synchronize, closed]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: fly-preview-${{ github.event.pull_request.number }}
+  cancel-in-progress: false
+
+jobs:
+  review-app:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Skip until FLY_API_TOKEN exists
+        id: gate
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+        run: |
+          if [ -n "${FLY_API_TOKEN}" ]; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "present=false" >> "$GITHUB_OUTPUT"
+            echo "FLY_API_TOKEN is not set. The review app stays undeployed."
+          fi
+
+      - name: Review app
+        if: steps.gate.outputs.present == 'true'
+        uses: superfly/fly-pr-review-apps@1.5.0
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+          FLY_ORG: ${{ vars.FLY_ORG }}
+          FLY_REGION: ${{ vars.FLY_REGION }}
+        with:
+          org: ${{ vars.FLY_ORG }}
+          region: ${{ vars.FLY_REGION }}
+          memory: "512"
+          build_args: TAFO_REV=${{ github.event.pull_request.head.sha }}

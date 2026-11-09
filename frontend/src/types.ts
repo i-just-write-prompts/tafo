@@ -48,6 +48,8 @@ export interface Meta {
   filter_note: string;
   version?: string;
   human_edits_auto_approve?: boolean;
+  preview?: boolean;
+  preview_banner?: string;
 }
 
 export interface BusyInterval {

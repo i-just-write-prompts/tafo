@@ -166,6 +166,11 @@ export function App() {
           </span>
         </div>
       </header>
+      {meta?.preview && (
+        <p className="preview-banner" role="status" data-testid="preview-banner">
+          {meta.preview_banner || "Preview. Demo data only. This copy resets when the server restarts and is not synced to Google."}
+        </p>
+      )}
       {meta && (
         <p className="gap-banner" data-testid="outlook-gap" title={meta.outlook_gap}>
           <strong>Not conflict-free. </strong>

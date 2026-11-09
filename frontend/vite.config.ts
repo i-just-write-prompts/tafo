@@ -3,6 +3,8 @@ import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
 
 function revision(): string {
+  const fromEnv = process.env.TAFO_REV?.trim();
+  if (fromEnv) return fromEnv;
   try {
     return execSync("git rev-parse HEAD", { encoding: "utf8" }).trim();
   } catch {
