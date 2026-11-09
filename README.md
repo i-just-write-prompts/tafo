@@ -203,8 +203,21 @@ Approving a calendar proposal inserts one outbox row. A second approval returns 
 cd backend
 ..\.venv\Scripts\python -m pytest
 cd ..\frontend
+npm test
 npm run typecheck
 npm run build
+```
+
+Playwright runs the Slice 1 plan against a throwaway database loaded by `scripts/load_demo_fixture.py`. It refuses `data/tafo.sqlite`. GitHub Actions runs pytest, vitest, typecheck, the production build, and these browser tests on every pull request.
+
+```bash
+python3 -m venv .venv
+.venv/bin/python -m pip install -e "backend[dev]"
+cd frontend
+npm ci
+npm run build
+npx playwright install --with-deps chromium webkit
+npm run e2e
 ```
 
 Covered: task CRUD and filters, timers, weekly bullets, approval gates, optimistic concurrency, duplicate outbox and retry, demo versus live (including no network in demo and fail-closed live), mirror dedupe, fixed appointments, backup, migrations, and the deferred manager response.

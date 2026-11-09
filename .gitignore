@@ -19,3 +19,7 @@ token.json
 *.pem
 *.tsbuildinfo
 frontend/node_modules/.tmp/
+.e2e-tmp/
+playwright-report/
+test-results/
+review-screenshots/

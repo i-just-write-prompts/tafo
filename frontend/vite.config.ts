@@ -10,6 +10,8 @@ function revision(): string {
   }
 }
 
+const apiProxy = process.env.TAFO_API_PROXY ?? "http://127.0.0.1:8787";
+
 export default defineConfig({
   plugins: [react()],
   define: {
@@ -20,7 +22,15 @@ export default defineConfig({
     port: 5173,
     strictPort: true,
     proxy: {
-      "/api": "http://127.0.0.1:8787",
+      "/api": apiProxy,
+    },
+  },
+  preview: {
+    host: "127.0.0.1",
+    port: 4173,
+    strictPort: true,
+    proxy: {
+      "/api": apiProxy,
     },
   },
 });
