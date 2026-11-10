@@ -1,7 +1,7 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { flushSync } from "react-dom";
-import { ApiError, api, reportFailure } from "../api";
-import { PlanActions } from "../plan/actions";
+import { ApiError, reportFailure } from "../api";
+import { calendar } from "../calendar/client";
 import { PlanMachine } from "../plan/planMachine";
 import { PlanBoard } from "../plan/selectors";
 import { PlanTime } from "../plan/time";
@@ -422,19 +422,6 @@ export function CalendarShell(props: Props) {
     }
   }
 
-  async function writeBlock(block: CalendarBlock, title: string, start: string, end: string, acknowledgeFixed = false) {
-    const proposal = await PlanActions.updateBlock({
-      block,
-      title,
-      startsAt: start,
-      endsAt: end,
-      timeZone,
-      key: PlanActions.gestureKey("move"),
-      explanation: `Moved ${title}.`,
-    });
-    return PlanActions.approve(proposal, acknowledgeFixed);
-  }
-
   async function saveQuick(event: CalEvent, startIso: string, endIso: string, acknowledgeFixed = false) {
     if (busy) return;
     const original = { start: event.start, end: event.end };
@@ -444,32 +431,51 @@ export function CalendarShell(props: Props) {
       if (event.kind === "proposal") {
         const proposal = propsRef.current.proposals.find((item) => item.id === event.id);
         if (!proposal) return;
-        const payload = { ...PlanBoard.payload(proposal), starts_at: startIso, ends_at: endIso };
-        await api(`/api/decisions/${proposal.id}/edit`, {
-          method: "POST",
-          body: JSON.stringify({ expected_version: proposal.version, confirmed: true, payload }),
+        await calendar.move({
+          kind: "proposal",
+          title: event.title,
+          startsAt: startIso,
+          endsAt: endIso,
+          timeZone,
+          proposal,
         });
         const hour = withMove(event, startIso, endIso, timeZone).startHour;
         pushToast(quickToast(event.title, hour), async () => {
-          await api(`/api/decisions/${proposal.id}/edit`, {
-            method: "POST",
-            body: JSON.stringify({
-              expected_version: proposal.version + 1,
-              confirmed: true,
-              payload: { ...payload, starts_at: original.start, ends_at: original.end },
-            }),
+          await calendar.undo({
+            kind: "proposal",
+            title: event.title,
+            startsAt: original.start,
+            endsAt: original.end,
+            timeZone,
+            proposal,
           });
           await propsRef.current.onRefresh();
         });
       } else {
         const block = propsRef.current.blocks.find((item) => item.id === event.id);
         if (!block) return;
-        const saved = await writeBlock(block, event.title, startIso, endIso, acknowledgeFixed);
+        const saved = await calendar.move({
+          kind: "block",
+          title: event.title,
+          startsAt: startIso,
+          endsAt: endIso,
+          timeZone,
+          acknowledgeFixed,
+          block,
+        });
         const hour = withMove(event, startIso, endIso, timeZone).startHour;
         const message = quickToast(event.title, hour);
         const nextBlock = saved.block;
         pushToast(message, nextBlock ? async () => {
-          await writeBlock(nextBlock, event.title, original.start, original.end, acknowledgeFixed);
+          await calendar.undo({
+            kind: "block",
+            title: event.title,
+            startsAt: original.start,
+            endsAt: original.end,
+            timeZone,
+            acknowledgeFixed,
+            block: nextBlock,
+          });
           setOverrides((current) => {
             const copy = { ...current };
             delete copy[event.id];
@@ -500,7 +506,7 @@ export function CalendarShell(props: Props) {
       kind: server.kind,
       title: existing?.title || server.title,
       version: existing?.version ?? server.version,
-      key: existing && sameTarget ? existing.key : PlanActions.gestureKey("plan"),
+      key: calendar.saveKey("plan", existing?.key, Boolean(existing && sameTarget)),
       from: existing?.from ?? { start: server.start, end: server.end },
       to,
       fromDayKey: existing?.fromDayKey ?? server.dayKey,
@@ -764,23 +770,6 @@ export function CalendarShell(props: Props) {
     nudge(event, minutes, days);
   }
 
-  async function readCalendar() {
-    const waits = [0, 200, 500];
-    for (let attempt = 0; attempt < waits.length; attempt += 1) {
-      if (waits[attempt] > 0) await new Promise((resolve) => window.setTimeout(resolve, waits[attempt]));
-      try {
-        const [blockBody, proposalBody] = await Promise.all([
-          api<{ blocks: CalendarBlock[] }>("/api/calendar/blocks"),
-          api<{ proposals: Proposal[] }>("/api/hermes/proposals"),
-        ]);
-        return { blockBody, proposalBody };
-      } catch {
-        if (attempt === waits.length - 1) return null;
-      }
-    }
-    return null;
-  }
-
   async function approveAll() {
     if (busy || approving.current || approveDisabled(plan.moves.length, included.length)) return;
     approving.current = true;
@@ -793,29 +782,29 @@ export function CalendarShell(props: Props) {
       if (!event) continue;
       if (event.kind === "proposal") {
         approvals.push({
-          proposal_id: event.id,
-          expected_version: move.version,
-          starts_at: move.to.start,
-          ends_at: move.to.end,
+          proposalId: event.id,
+          expectedVersion: move.version,
+          startsAt: move.to.start,
+          endsAt: move.to.end,
         });
       } else {
         moves.push({
-          block_id: event.id,
-          expected_version: move.version,
-          starts_at: move.to.start,
-          ends_at: move.to.end,
-          idempotency_key: move.key,
+          blockId: event.id,
+          expectedVersion: move.version,
+          startsAt: move.to.start,
+          endsAt: move.to.end,
+          idempotencyKey: move.key,
           title: move.title || event.title,
-          acknowledge_fixed_move: event.fixed,
+          acknowledgeFixedMove: event.fixed,
         });
       }
     }
     const missing = plan.moves.filter((move) => !serverEvents.some((event) => event.id === move.id));
     for (const id of included) {
-      if (approvals.some((item) => item.proposal_id === id)) continue;
+      if (approvals.some((item) => item.proposalId === id)) continue;
       const event = serverEvents.find((item) => item.id === id);
       if (!event) continue;
-      approvals.push({ proposal_id: id, expected_version: event.version });
+      approvals.push({ proposalId: id, expectedVersion: event.version });
     }
     if (moves.length === 0 && approvals.length === 0) {
       approving.current = false;
@@ -825,15 +814,9 @@ export function CalendarShell(props: Props) {
     }
     setBusy(true);
     try {
-      const committed = await api<{
-        moves: Array<{ saved: boolean; item_id: string; item_title: string }>;
-        approvals: Array<{ saved: boolean; item_id: string; item_title: string }>;
-      }>("/api/decisions/plan/commit", {
-        method: "POST",
-        body: JSON.stringify({ confirmed: true, moves, approvals }),
-      });
+      const committed = await calendar.commitPlan({ moves, approvals });
       const savedIds = new Set(
-        [...committed.moves, ...committed.approvals].filter((item) => item.saved).map((item) => item.item_id),
+        [...committed.moves, ...committed.approvals].filter((item) => item.saved).map((item) => item.id),
       );
       const unsavedIds = plan.moves.filter((move) => !savedIds.has(move.id)).map((move) => move.id);
       const kept = retainMoves(plan, unsavedIds);
@@ -842,24 +825,23 @@ export function CalendarShell(props: Props) {
       setOverrides({});
       setOverlay(null);
       const stagedIds = new Set(plan.moves.map((move) => move.id));
-      const savedMoves = [...committed.moves, ...committed.approvals].filter((item) => item.saved && stagedIds.has(item.item_id)).length;
-      const savedProposals = committed.approvals.filter((item) => item.saved && !stagedIds.has(item.item_id)).length;
+      const savedMoves = [...committed.moves, ...committed.approvals].filter((item) => item.saved && stagedIds.has(item.id)).length;
+      const savedProposals = committed.approvals.filter((item) => item.saved && !stagedIds.has(item.id)).length;
       const unsavedTitles = [
-        ...committed.moves.filter((item) => !item.saved).map((item) => item.item_title || "A move"),
-        ...committed.approvals.filter((item) => !item.saved).map((item) => plan.moves.find((move) => move.id === item.item_id)?.title || item.item_title || "A proposal"),
+        ...committed.moves.filter((item) => !item.saved).map((item) => item.title || "A move"),
+        ...committed.approvals.filter((item) => !item.saved).map((item) => plan.moves.find((move) => move.id === item.id)?.title || item.title || "A proposal"),
         ...missing.map((move) => move.title),
       ];
-      const confirmed = await readCalendar();
       const message = unsavedTitles.length > 0
         ? partialPlanToast(savedMoves + savedProposals, savedMoves + savedProposals + unsavedTitles.length, unsavedTitles)
-        : confirmed
+        : committed.confirmed
           ? approvedToast(savedMoves, savedProposals)
           : SAVED_REFRESH;
       if (savedMoves + savedProposals > 0) {
-        glowIds([...committed.moves, ...committed.approvals].filter((item) => item.saved).map((item) => item.item_id));
+        glowIds([...committed.moves, ...committed.approvals].filter((item) => item.saved).map((item) => item.id));
       }
       pushToast(message);
-      if (confirmed) await propsRef.current.onRefresh();
+      if (committed.confirmed) await propsRef.current.onRefresh();
     } catch (error) {
       if (error instanceof ApiError && error.code === "version_conflict") setOverlay(null);
       await fail(error);
@@ -875,10 +857,10 @@ export function CalendarShell(props: Props) {
     setBusy(true);
     try {
       if (action === "deny") {
-        await PlanActions.reject(proposal, "Denied");
+        await calendar.decide(proposal, "deny");
         pushToast(denyToast(event.title));
       } else {
-        await PlanActions.approve(proposal);
+        await calendar.decide(proposal, "approve");
         pushToast(`Approved ${event.title}.`);
         glowIds([event.id]);
       }

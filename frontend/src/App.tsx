@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { OFFLINE_MESSAGE, api } from "./api";
+import { ENTIRE_CALENDAR, calendar } from "./calendar/client";
 import { CalendarShell } from "./v3/Shell";
 import type { CalendarBlock, Meta, Proposal, Task } from "./types";
 
@@ -13,16 +14,15 @@ export function App() {
 
   const refresh = useCallback(async () => {
     try {
-      const [nextMeta, taskBody, proposalBody, blockBody] = await Promise.all([
+      const [nextMeta, taskBody, snapshot] = await Promise.all([
         api<Meta>("/api/meta"),
         api<{ tasks: Task[] }>("/api/tasks?view=all&scope=all"),
-        api<{ proposals: Proposal[] }>("/api/hermes/proposals"),
-        api<{ blocks: CalendarBlock[] }>("/api/calendar/blocks"),
+        calendar.load(ENTIRE_CALENDAR),
       ]);
       setMeta(nextMeta);
       setTasks(taskBody.tasks);
-      setProposals(proposalBody.proposals);
-      setBlocks(blockBody.blocks);
+      setProposals(snapshot.proposals);
+      setBlocks(snapshot.blocks);
       setError(null);
       setLoading(false);
     } catch (reason) {
