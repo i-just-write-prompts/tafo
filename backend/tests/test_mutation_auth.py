@@ -25,6 +25,7 @@ BODIES = {
     ("POST", "/api/decisions/{proposal_id}/approve"): {"expected_version": 1, "confirmed": True},
     ("POST", "/api/decisions/{proposal_id}/edit"): {"expected_version": 1, "confirmed": True, "payload": {}},
     ("POST", "/api/decisions/{proposal_id}/reject"): {"expected_version": 1, "confirmed": True},
+    ("POST", "/api/decisions/{proposal_id}/undo"): {"expected_version": 1, "confirmed": True},
     ("POST", "/api/calendar/outbox/{outbox_id}/retry"): None,
     ("POST", "/api/admin/backup"): None,
     ("POST", "/api/admin/restore"): {"confirm": "REPLACE_LOCAL_DATA", "snapshot": {}},

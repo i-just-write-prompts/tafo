@@ -423,6 +423,86 @@ def reject_proposal(
     return updated
 
 
+def undo_block_approval(
+    conn: sqlite3.Connection,
+    settings: Settings,
+    proposal_id: str,
+    *,
+    expected_version: int,
+    actor: str,
+) -> dict:
+    """Return an approved calendar suggestion to pending and queue cancellation of its block."""
+    row = conn.execute("SELECT * FROM proposals WHERE id = ?", (proposal_id,)).fetchone()
+    if row is None:
+        raise Problem(404, "not_found", "Proposal not found.")
+    if row["status"] != "approved" or row["kind"] != "calendar_block":
+        raise Problem(409, "not_approved", "Only an approved calendar suggestion can be undone.")
+    if int(row["version"]) != expected_version:
+        raise Problem(409, "version_conflict", "This proposal changed, so nothing was undone.", current_version=row["version"])
+    payload = effective_payload(row)
+    task_id = payload.get("task_id")
+    prior = outbox_for_proposal(conn, proposal_id)
+    event_key = ""
+    if prior is not None:
+        stored = prior.get("payload") if isinstance(prior.get("payload"), dict) else {}
+        event_key = str(prior.get("event_key") or stored.get("event_key") or "")
+    blocks: list[dict] = []
+    if event_key:
+        block = get_block(conn, event_key)
+        if block is not None and block["status"] == "scheduled":
+            blocks.append(block)
+    if not blocks and isinstance(task_id, str) and task_id:
+        found = conn.execute(
+            "SELECT * FROM calendar_blocks WHERE task_id = ? AND status = 'scheduled'",
+            (task_id,),
+        ).fetchall()
+        blocks = [dict(item) for item in found]
+    cancel_ids: list[str] = []
+    for block in blocks:
+        cancel_payload = {
+            "event_key": block["id"],
+            "task_id": block.get("task_id"),
+            "title": block["title"],
+            "description": block.get("description") or "",
+            "starts_at": block["starts_at"],
+            "ends_at": block["ends_at"],
+            "domain": block["domain"],
+            "invite_work_email": bool(block.get("invite_work_email")),
+            "fixed": bool(block.get("fixed")),
+        }
+        outbox_id = ensure_outbox(conn, proposal_id, "calendar_cancel", cancel_payload, settings.calendar_mode)
+        google_event_id = block.get("google_event_id")
+        if settings.calendar_mode != "demo" and google_event_id:
+            conn.execute(
+                "UPDATE outbox_operations SET google_event_id = ? WHERE id = ? AND google_event_id IS NULL",
+                (google_event_id, outbox_id),
+            )
+        cancel_ids.append(outbox_id)
+    now = utc_now_iso()
+    cursor = conn.execute(
+        """
+        UPDATE proposals
+        SET status = 'pending', edited_payload_json = NULL, decision_note = NULL, decided_at = NULL,
+            version = version + 1, updated_at = ?
+        WHERE id = ? AND version = ? AND status = 'approved'
+        """,
+        (now, proposal_id, expected_version),
+    )
+    if cursor.rowcount != 1:
+        raise Problem(409, "version_conflict", "This proposal changed, so nothing was undone.")
+    write_audit(
+        conn,
+        actor=actor,
+        action="proposal.undo",
+        entity_type="proposal",
+        entity_id=proposal_id,
+        detail={"cancellations": cancel_ids},
+    )
+    updated = get_proposal(conn, proposal_id)
+    assert updated is not None
+    return {"proposal": updated, "cancel_ids": cancel_ids}
+
+
 def _apply_task(conn: sqlite3.Connection, payload: dict, acknowledge_task_drift: bool, actor: str) -> None:
     if payload["op"] == "create":
         create_task(conn, payload["task"], actor=actor)

@@ -25,6 +25,7 @@ from tafo.decisions import (
     list_proposals,
     reject_proposal,
     stage_approval,
+    undo_block_approval,
 )
 from tafo.migrate import apply_migrations
 from tafo.outbox import list_outbox, process_outbox, serialize_outbox
@@ -606,6 +607,24 @@ def create_app(settings: Settings | None = None, adapter: CalendarAdapter | None
             payload=body.payload,
             actor="human",
         )
+
+    @app.post("/api/decisions/{proposal_id}/undo", tags=["decisions"])
+    def post_undo(proposal_id: str, body: DecisionBody, request: Request) -> dict:
+        """Undo a quick drag of a Proposed block: pending again, and the new block cancelled."""
+        _require_decision(request)
+        _require_confirmed(body.confirmed)
+        with session(settings.db_path) as conn:
+            staged = undo_block_approval(
+                conn,
+                settings,
+                proposal_id,
+                expected_version=body.expected_version,
+                actor="human",
+            )
+        cancellations = [process_outbox(settings, adapter, outbox_id) for outbox_id in staged["cancel_ids"]]
+        with session(settings.db_path) as conn:
+            proposal = get_proposal(conn, proposal_id)
+        return {"proposal": proposal or staged["proposal"], "cancellations": cancellations}
 
     @app.post("/api/decisions/{proposal_id}/reject", tags=["decisions"])
     def post_reject(proposal_id: str, body: DecisionBody, request: Request) -> dict:
