@@ -63,3 +63,20 @@ test("PM2 a saved quick drag keeps Undo and its new spot when the re-read fails"
   expect(undoCount, "Undo is offered after a quick save").toBeGreaterThan(0);
   expect(label ?? "", "the block shows where Mike put it (1 PM)").toMatch(/1:00–2:00/);
 });
+
+test("PM1 a second quick drag while the first one saves is not thrown away", async ({ page }) => {
+  const lunchBefore = await blockRow(page, "Lunch w/ Sam");
+  const vendorBefore = await blockRow(page, "Call vendor");
+  if (!lunchBefore || !vendorBefore) throw new Error("fixture missing");
+  await page.route("**/api/decisions/*/approve", async (route) => {
+    await new Promise((resolve) => setTimeout(resolve, 2500));
+    await route.continue();
+  });
+  await drag(page, "Lunch w/ Sam", 60);
+  await drag(page, "Call vendor", 120);
+  await page.waitForTimeout(8000);
+  const lunch = await blockRow(page, "Lunch w/ Sam");
+  const vendor = await blockRow(page, "Call vendor");
+  expect(lunch?.starts_at).not.toBe(lunchBefore.starts_at);
+  expect(vendor?.starts_at, "second drag was saved").not.toBe(vendorBefore.starts_at);
+});
