@@ -653,3 +653,33 @@ def test_commit_refuses_an_empty_plan(tmp_path):
         assert response.json()["detail"]["code"] == "empty_plan"
     finally:
         client.__exit__(None, None, None)
+
+
+def test_undo_of_a_proposed_drag_reverts_the_approval_and_the_block(tmp_path):
+    """PR1 Undo must leave the suggestion pending and take the new block off the calendar."""
+    client = open_week(tmp_path)
+    try:
+        budget = proposal_named(client, "Budget sheet")
+        approved = client.post(
+            f"/api/decisions/{budget['id']}/approve",
+            json={"expected_version": budget["version"], "confirmed": True},
+        )
+        assert approved.status_code == 200, approved.text
+        proposal = approved.json()["proposal"]
+        assert proposal["status"] == "approved"
+        task_id = (proposal.get("edited_payload") or proposal["payload"])["task_id"]
+        blocks = client.get("/api/calendar/blocks").json()["blocks"]
+        landed = [row for row in blocks if row["task_id"] == task_id and row["status"] == "scheduled"]
+        assert len(landed) == 1
+        undone = client.post(
+            f"/api/decisions/{budget['id']}/undo",
+            json={"expected_version": proposal["version"], "confirmed": True},
+        )
+        assert undone.status_code == 200, undone.text
+        again = proposal_named(client, "Budget sheet")
+        assert again["status"] == "pending"
+        assert again["edited_payload"] is None
+        after = client.get("/api/calendar/blocks").json()["blocks"]
+        assert [row for row in after if row["task_id"] == task_id and row["status"] == "scheduled"] == []
+    finally:
+        client.__exit__(None, None, None)
