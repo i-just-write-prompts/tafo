@@ -507,22 +507,36 @@ export function CalendarShell(props: Props) {
         const proposal = propsRef.current.proposals.find((item) => item.id === event.id);
         if (!proposal) return;
         const payload = { ...PlanBoard.payload(proposal), starts_at: startIso, ends_at: endIso };
-        await api(`/api/decisions/${proposal.id}/edit`, {
+        const edited = await api<Proposal>(`/api/decisions/${proposal.id}/edit`, {
           method: "POST",
           body: JSON.stringify({ expected_version: proposal.version, confirmed: true, payload }),
         });
+        const saved = await PlanActions.approve(edited);
+        if (!calendarWriteLanded(saved, startIso, endIso)) {
+          setOverrides((current) => {
+            const copy = { ...current };
+            delete copy[event.id];
+            return copy;
+          });
+          const outboxId = saved.outbox?.id;
+          pushToast(
+            refusedMoveToast(event.title),
+            undefined,
+            outboxId ? () => retryRefused(outboxId, event.title, startIso, endIso) : undefined,
+          );
+          return;
+        }
         const hour = withMove(event, startIso, endIso, timeZone).startHour;
-        pushToast(quickToast(event.title, hour), async () => {
-          await api(`/api/decisions/${proposal.id}/edit`, {
-            method: "POST",
-            body: JSON.stringify({
-              expected_version: proposal.version + 1,
-              confirmed: true,
-              payload: { ...payload, starts_at: original.start, ends_at: original.end },
-            }),
+        const nextBlock = saved.block;
+        pushToast(quickToast(event.title, hour), nextBlock ? async () => {
+          await writeBlock(nextBlock, event.title, original.start, original.end);
+          setOverrides((current) => {
+            const copy = { ...current };
+            delete copy[event.id];
+            return copy;
           });
           await propsRef.current.onRefresh();
-        });
+        } : undefined);
       } else {
         const block = propsRef.current.blocks.find((item) => item.id === event.id);
         if (!block) return;
