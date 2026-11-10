@@ -1,6 +1,6 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
-import { approveDisabled, enterPlan, exitPlan, includedIds, proposalsOnDays, revertMoves, stageMove, toggleSkip } from "./session";
+import { approveDisabled, enterPlan, exitPlan, includedIds, loadPlan, pendingProposalIds, proposalsOnDays, revertMoves, savePlan, stageMove, toggleSkip } from "./session";
 
 describe("plan session", () => {
   it("starts empty and entering does not invent moves", () => {
@@ -73,5 +73,29 @@ describe("plan session", () => {
     const week = ["2026-11-09", "2026-11-10", "2026-11-11", "2026-11-12", "2026-11-13", "2026-11-14", "2026-11-15"];
     expect(proposalsOnDays(events, week).map((event) => event.id)).toEqual(["budget", "closet"]);
     expect(proposalsOnDays(events, ["2026-11-10"]).map((event) => event.id)).toEqual(["budget", "closet"]);
+  });
+
+  it("treats a moved proposal as a decision and remembers it for reload", () => {
+    const memory = new Map<string, string>();
+    vi.stubGlobal("localStorage", {
+      getItem: (key: string) => memory.get(key) ?? null,
+      setItem: (key: string, value: string) => memory.set(key, value),
+      removeItem: (key: string) => memory.delete(key),
+    });
+    expect(pendingProposalIds(["budget", "closet"], [{ id: "budget" }])).toEqual(["closet"]);
+    const session = stageMove(enterPlan(), {
+      id: "budget",
+      kind: "proposal",
+      from: { start: "a", end: "b" },
+      to: { start: "c", end: "d" },
+      fromDayKey: "2026-11-10",
+      dayKey: "2026-11-10",
+    });
+    savePlan(session);
+    expect(loadPlan().moves.map((move) => move.id)).toEqual(["budget"]);
+    savePlan(exitPlan());
+    expect(loadPlan().active).toBe(false);
+    expect(loadPlan().moves).toEqual([]);
+    vi.unstubAllGlobals();
   });
 });

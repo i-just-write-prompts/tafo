@@ -475,18 +475,44 @@ body { margin: 0; background: #0a0b0d; }
   padding: 0 16px;
   flex: none;
   position: relative;
+  z-index: 6;
 }
+.tray-sheet {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 92px;
+  z-index: 5;
+  height: min(420px, 62vh);
+  display: flex;
+  flex-direction: column;
+  padding: 8px 16px 12px;
+  background: var(--sheet);
+  border-radius: 18px 18px 0 0;
+  box-shadow: 0 -12px 30px rgba(0, 0, 0, 0.35);
+  transform: translateY(100%);
+  transition: transform 250ms var(--ease);
+  pointer-events: none;
+}
+.tray-sheet[data-open="1"] {
+  transform: translateY(0);
+  pointer-events: auto;
+}
+.tray-sheet h2 { font-size: 22px; font-weight: 650; margin-top: 8px; }
+.tray-sheet-body { overflow: auto; min-height: 0; }
 .v3[data-layout="frame"] .v3-tray { position: absolute; left: 0; right: 0; bottom: 0; z-index: 6; }
 .tray-grip {
   position: absolute;
   top: 7px;
   left: 50%;
   width: 36px;
-  height: 5px;
+  height: 18px;
   border-radius: 3px;
-  background: #3a3e45;
+  background: linear-gradient(#3a3e45, #3a3e45) center 4px / 36px 5px no-repeat;
   transform: translateX(-50%);
+  touch-action: none;
 }
+.tray-sheet .tray-grip { position: relative; top: 0; left: 0; transform: none; align-self: center; flex: none; }
 .unscheduled {
   display: flex;
   align-items: center;

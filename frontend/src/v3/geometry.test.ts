@@ -67,7 +67,7 @@ describe("day geometry", () => {
 });
 
 describe("week geometry and drag", () => {
-  it("keeps a 2px gap before the slim overlap", () => {
+  it("puts overlapping week events side by side, both wide enough to read", () => {
     const boxes = weekBoxes(
       [
         { id: "h2", day: 3, start: 10, end: 11.5 },
@@ -76,9 +76,12 @@ describe("week geometry and drag", () => {
       390,
     );
     const main = boxes.find((box) => box.id === "h2");
-    const nub = boxes.find((box) => box.id === "h5");
-    expect(nub?.slim).toBe(true);
-    expect(main && nub ? nub.x - (main.x + main.w) : 0).toBeCloseTo(WEEK_LANE_GAP, 5);
+    const other = boxes.find((box) => box.id === "h5");
+    expect(main?.slim).toBe(false);
+    expect(other?.slim).toBe(false);
+    expect(main && other && main.w).toBeGreaterThan(12);
+    expect(other && other.w).toBeGreaterThan(12);
+    expect(main && other ? other.x - (main.x + main.w) : 0).toBeCloseTo(WEEK_LANE_GAP, 5);
   });
 
   it("snaps to 15 minutes and can change day only in week", () => {
