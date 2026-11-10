@@ -226,7 +226,7 @@ Covered: task CRUD and filters, timers, weekly bullets, approval gates, optimist
 
 The image in `Dockerfile` is a review app, not a production deploy. FastAPI serves `frontend/dist` and `/api` on one origin. `TAFO_PREVIEW=1` forces demo calendar mode, drops Google credentials and the work invite address, and reloads the Slice 1 fixture into `/tmp` every time the process starts. There is no volume. Preview mode requires `PREVIEW_PASSWORD` (HTTP Basic, any username). If that password is unset, every request except `GET /api/health` returns 503. `.dockerignore` excludes `.env` and `data/`.
 
-`.github/workflows/fly-preview.yml` checks for the `FLY_API_TOKEN` repository secret and skips the deploy when that secret is absent. `fly.toml` stops the machine when it is idle (`auto_stop_machines = "stop"`).
+`.github/workflows/fly-preview.yml` checks for the `FLY_API_TOKEN` repository secret and skips the deploy when that secret is absent. `PREVIEW_PASSWORD` is staged with `flyctl secrets import --stage` from stdin, then the app is deployed. `fly.toml` stops the machine when it is idle (`auto_stop_machines = "stop"`).
 
 ## Future
 
