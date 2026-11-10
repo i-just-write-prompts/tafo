@@ -1,0 +1,2 @@
+# 94fb967 added gitleaks' own fake aws-access-token test key so the scan would fail, and the next commit deleted the file. Not a real credential. This ignores that one commit only.
+94fb96729bd6671b55602fc6d2526dc9d39c8c50:ci/gitleaks-proof-fixture.txt:aws-access-token:3
