@@ -244,7 +244,7 @@ export function CalendarShell(props: Props) {
   const dayEvents = shown.filter((event) => event.dayKey === anchor);
   const weekEvents = shown.filter((event) => weekKeys.includes(event.dayKey));
   const rangeIds = pendingProposalIds(
-    proposalsOnDays(events, mode === "day" ? [anchor] : weekKeys).map((event) => event.id),
+    proposalsOnDays(baseEvents, mode === "day" ? [anchor] : weekKeys).map((event) => event.id),
     plan.moves,
   );
   const included = includedIds(rangeIds, plan.skipped);
