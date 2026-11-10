@@ -56,14 +56,19 @@ export function gutterClock(hour: number): string {
   return `${h12}:${String(mm).padStart(2, "0")}`;
 }
 
+function withMinutes(label: string): string {
+  const space = label.lastIndexOf(" ");
+  const body = space === -1 ? label : label.slice(0, space);
+  const suffix = space === -1 ? "" : label.slice(space);
+  const timed = body.includes(":") ? body : `${body}:00`;
+  return `${timed}${suffix}`;
+}
+
 export function rangeLabel(start: number, end: number): string {
-  let a = clock(start);
-  const b = clock(end);
-  if (a.slice(-2) === b.slice(-2)) a = a.slice(0, -3);
-  if (!a.includes(":")) a = `${a}:00`;
-  const head = b.split(" ")[0];
-  const b2 = head.includes(":") ? b : b.replace(" ", ":00 ");
-  return `${a}–${b2}`;
+  const aFull = withMinutes(clock(start));
+  const bFull = withMinutes(clock(end));
+  const a = aFull.slice(-2) === bFull.slice(-2) ? aFull.slice(0, -3) : aFull;
+  return `${a}–${bFull}`;
 }
 
 export function shortRange(start: number, end: number): string {

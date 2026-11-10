@@ -1,6 +1,49 @@
-import { expect, test } from "@playwright/test";
+import { expect, test, type Locator, type Page } from "@playwright/test";
 
 import { block, center, dragHold, openDay, press, reseed, shot } from "./support";
+
+async function expectOneLine(toast: Locator) {
+  const line = await toast.locator("p").boundingBox();
+  const pill = await toast.boundingBox();
+  if (!line || !pill) throw new Error("toast geometry missing");
+  expect(line.height).toBeLessThanOrEqual(22);
+  expect(pill.height).toBeLessThanOrEqual(44);
+}
+
+function intersection(
+  a: { x: number; y: number; width: number; height: number },
+  b: { x: number; y: number; width: number; height: number },
+) {
+  const x = Math.max(a.x, b.x);
+  const y = Math.max(a.y, b.y);
+  const right = Math.min(a.x + a.width, b.x + b.width);
+  const bottom = Math.min(a.y + a.height, b.y + b.height);
+  if (right - x < 1 || bottom - y < 1) return null;
+  return { x, y, width: right - x, height: bottom - y };
+}
+
+async function expectClearOfEvents(page: Page, toast: Locator) {
+  const toastBox = await toast.boundingBox();
+  if (!toastBox) throw new Error("toast geometry missing");
+  const grids = [];
+  for (const id of ["day-grid", "week-grid"]) {
+    const grid = page.getByTestId(id);
+    if (await grid.count() === 0) continue;
+    const box = await grid.boundingBox();
+    if (box) grids.push(box);
+  }
+  const blocks = await page.locator(".block, .slim").all();
+  for (const item of blocks) {
+    const box = await item.boundingBox();
+    if (!box) continue;
+    for (const gridBox of grids) {
+      const visible = intersection(box, gridBox);
+      if (visible && intersection(visible, toastBox)) {
+        expect(false, `toast overlaps ${await item.getAttribute("aria-label")}`).toBe(true);
+      }
+    }
+  }
+}
 
 test.beforeEach(async ({ page, request }) => {
   await reseed(request);
@@ -20,24 +63,23 @@ test("opens on Day", async ({ page }, testInfo) => {
 test("quick drag saves with a toast and Undo", async ({ page }, testInfo) => {
   const vendor = block(page, "Call vendor,");
   const start = await center(vendor);
-  const scrollBefore = await page.getByTestId("day-grid").evaluate((node) => node.scrollTop);
+  const grid = page.getByTestId("day-grid");
+  const scrollBefore = await grid.evaluate((node) => node.scrollTop);
+  const gridBefore = await grid.boundingBox();
   await dragHold(page, start.x, start.y, start.x, start.y + 60);
   const toast = page.getByTestId("plan-toast");
   await expect(toast).toContainText("Call vendor → 11:00 AM");
   await expect(toast.getByRole("button", { name: "Undo" })).toBeVisible();
   await expect(page.getByTestId("sync-chip")).toContainText("Demo · not synced");
   await expect(page.getByTestId("plan-banner")).toHaveCount(0);
-  const toastBox = await toast.boundingBox();
-  const trayBox = await page.locator(".v3-tray").boundingBox();
-  const budgetBox = await block(page, "Budget sheet").boundingBox();
-  const gridBox = await page.getByTestId("day-grid").boundingBox();
-  const scrollAfter = await page.getByTestId("day-grid").evaluate((node) => node.scrollTop);
-  if (!toastBox || !trayBox || !budgetBox || !gridBox) throw new Error("toast geometry missing");
+  await expectOneLine(toast);
+  const gridBox = await grid.boundingBox();
+  const scrollAfter = await grid.evaluate((node) => node.scrollTop);
+  if (!gridBox || !gridBefore) throw new Error("grid geometry missing");
   expect(scrollAfter).toBe(scrollBefore);
-  expect(toastBox.y + toastBox.height).toBeLessThanOrEqual(trayBox.y + 1);
-  const budgetBottom = Math.min(budgetBox.y + budgetBox.height, gridBox.y + gridBox.height);
-  const coversBudget = toastBox.y < budgetBottom - 1 && toastBox.y + toastBox.height > budgetBox.y + 1;
-  expect(coversBudget).toBe(false);
+  expect(gridBox.height).toBeCloseTo(gridBefore.height, 0);
+  expect(gridBox.y).toBeCloseTo(gridBefore.y, 0);
+  await expectClearOfEvents(page, toast);
   await shot(page, testInfo, "quick-drag-toast");
   await press(toast.getByRole("button", { name: "Undo" }), testInfo.project.name);
   await expect(page.getByRole("button", { name: /Call vendor, Tue, Nov 10, 10:00/ })).toBeVisible();
@@ -60,6 +102,8 @@ test("deny", async ({ page }, testInfo) => {
   await press(page.getByRole("button", { name: "Deny", exact: true }), testInfo.project.name);
   const toast = page.getByTestId("plan-toast");
   await expect(toast).toHaveText("Denied · Budget sheet → Unscheduled");
+  await expectOneLine(toast);
+  await expectClearOfEvents(page, toast);
   await expect(toast.getByRole("button", { name: "Undo" })).toHaveCount(0);
   await expect(page.getByRole("button", { name: /Budget sheet/ })).toHaveCount(0);
   await shot(page, testInfo, "denied");
@@ -140,6 +184,47 @@ test("narrow week drags retimes morning blocks and a partly hidden one", async (
   }
 });
 
+test("first touch drag after scrolling saves on the first try", async ({ page }, testInfo) => {
+  test.skip(testInfo.project.name !== "s23", "360 touch");
+  await press(page.getByTestId("view-switch"), testInfo.project.name);
+  await press(page.getByRole("menuitem", { name: "Week" }), testInfo.project.name);
+  const grid = page.getByTestId("week-grid");
+  const gridBox = await grid.boundingBox();
+  if (!gridBox) throw new Error("week grid missing");
+  const scrollBefore = await grid.evaluate((node) => node.scrollTop);
+  await touchDrag(page, gridBox.x + 14, gridBox.y + 240, gridBox.x + 14, gridBox.y + 140);
+  expect(await grid.evaluate((node) => node.scrollTop)).toBeGreaterThan(scrollBefore + 40);
+
+  async function dragOnce(title: string, scrollTop: number) {
+    await grid.evaluate((node, top) => { node.scrollTop = top; }, scrollTop);
+    const target = block(page, title);
+    const before = await target.getAttribute("aria-label");
+    const box = await target.boundingBox();
+    const gridBox = await grid.boundingBox();
+    if (!before || !box || !gridBox) throw new Error(`${title} missing`);
+    const x = box.x + Math.min(18, box.width / 2);
+    const y = Math.min(gridBox.y + gridBox.height - 28, Math.max(gridBox.y + 20, box.y + 18));
+    await touchDrag(page, x, y, x, y + 90);
+    await expect(page.getByTestId("plan-toast")).toContainText("→");
+    await expect(target).not.toHaveAttribute("aria-label", before);
+    return target.getAttribute("aria-label");
+  }
+
+  const specAfter = await dragOnce("Spec review", 80);
+  await page.reload();
+  await expect(page.getByRole("heading", { name: "Tue, Nov 10" })).toBeVisible();
+  await expect(page.getByRole("button", { name: specAfter ?? "" })).toBeVisible();
+
+  await press(page.getByTestId("view-switch"), testInfo.project.name);
+  await press(page.getByRole("menuitem", { name: "Week" }), testInfo.project.name);
+  const hikeAfter = await dragOnce("Hike,", 51);
+  await page.reload();
+  await expect(page.getByRole("heading", { name: "Tue, Nov 10" })).toBeVisible();
+  await press(page.getByTestId("view-switch"), testInfo.project.name);
+  await press(page.getByRole("menuitem", { name: "Week" }), testInfo.project.name);
+  await expect(block(page, "Hike,")).toHaveAttribute("aria-label", hikeAfter ?? "");
+});
+
 test("Plan enter keeps the current view", async ({ page }, testInfo) => {
   await press(page.getByTestId("plan-button"), testInfo.project.name);
   await expect(page.getByTestId("plan-banner")).toContainText("Drag blocks");
@@ -180,7 +265,10 @@ test("rearrange several items then Approve all", async ({ page }, testInfo) => {
   await expect(approve).toBeVisible();
   await shot(page, testInfo, "review");
   await press(approve, testInfo.project.name);
-  await expect(page.getByTestId("plan-toast")).toContainText("Approved 3 moves + 2 proposals");
+  const approved = page.getByTestId("plan-toast");
+  await expect(approved).toContainText("Approved 3 moves + 2 proposals");
+  await expectOneLine(approved);
+  await expectClearOfEvents(page, approved);
   await expect(page.getByRole("button", { name: /Budget sheet,.*Proposed/ })).toHaveCount(0);
   await expect(page.getByRole("button", { name: /Fix closet door,.*Proposed/ })).toHaveCount(0);
   await expect(page.getByRole("button", { name: /Spec review, Wed/ })).toBeVisible();
@@ -196,7 +284,10 @@ test("Revert restores staged moves and leaves proposals pending", async ({ page 
   await press(page.getByRole("button", { name: "Revert" }), testInfo.project.name);
   await shot(page, testInfo, "revert-sheet");
   await press(page.getByRole("button", { name: "Revert all" }), testInfo.project.name);
-  await expect(page.getByTestId("plan-toast")).toHaveText("Reverted. Nothing changed.");
+  const reverted = page.getByTestId("plan-toast");
+  await expect(reverted).toHaveText("Reverted. Nothing changed.");
+  await expectOneLine(reverted);
+  await expectClearOfEvents(page, reverted);
   await expect(page.getByTestId("plan-banner")).toHaveCount(0);
   await expect(page.getByTestId("plan-toast")).toBeHidden({ timeout: 5_000 });
   await expect(page.getByRole("button", { name: /Call vendor, Tue, Nov 10, 10:00/ })).toBeVisible();
@@ -242,7 +333,10 @@ test("keyboard-only path", async ({ page }) => {
 
   await focusMatching(/Call vendor/);
   await page.keyboard.press("ArrowDown");
-  await expect(page.getByTestId("plan-toast")).toContainText("Call vendor → 10:15 AM");
+  const nudged = page.getByTestId("plan-toast");
+  await expect(nudged).toContainText("Call vendor → 10:15 AM");
+  await expectOneLine(nudged);
+  await expectClearOfEvents(page, nudged);
   await focusMatching(/^Undo$/);
   await page.keyboard.press("Enter");
   await expect(page.getByRole("button", { name: /Call vendor, Tue, Nov 10, 10:00/ })).toBeVisible();
@@ -252,7 +346,10 @@ test("keyboard-only path", async ({ page }) => {
   await expect(page.getByRole("button", { name: "Deny", exact: true })).toBeVisible();
   await focusMatching(/^Deny$/);
   await page.keyboard.press("Enter");
-  await expect(page.getByTestId("plan-toast")).toHaveText("Denied · Budget sheet → Unscheduled");
+  const denied = page.getByTestId("plan-toast");
+  await expect(denied).toHaveText("Denied · Budget sheet → Unscheduled");
+  await expectOneLine(denied);
+  await expectClearOfEvents(page, denied);
   await expect(page.getByRole("button", { name: /Budget sheet/ })).toHaveCount(0);
 });
 

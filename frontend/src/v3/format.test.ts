@@ -25,6 +25,8 @@ describe("v3 clock copy", () => {
     expect(rangeLabel(12, 13)).toBe("12:00–1:00 PM");
     expect(rangeLabel(14, 15.5)).toBe("2:00–3:30 PM");
     expect(rangeLabel(17, 18)).toBe("5:00–6:00 PM");
+    expect(rangeLabel(11, 12.5)).toBe("11:00 AM–12:30 PM");
+    expect(rangeLabel(10, 12.5)).toBe("10:00 AM–12:30 PM");
     expect(shortRange(10, 10.5)).toBe("10–10:30");
     expect(gutterClock(10.75)).toBe("10:45");
     expect(gutterClock(11)).toBe("11:00");

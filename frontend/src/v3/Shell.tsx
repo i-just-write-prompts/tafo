@@ -505,8 +505,42 @@ export function CalendarShell(props: Props) {
     void saveQuick(event, start, end);
   }
 
-  function onPointerDown(event: CalEvent, pointer: React.PointerEvent<HTMLButtonElement>) {
-    if (pointer.button !== 0) return;
+  function blockUnder(x: number, y: number): CalEvent | null {
+    const grid = gridRef.current;
+    if (!grid) return null;
+    const nodes = grid.querySelectorAll<HTMLElement>(".block");
+    for (let index = nodes.length - 1; index >= 0; index -= 1) {
+      const rect = nodes[index].getBoundingClientRect();
+      if (x < rect.left || x > rect.right || y < rect.top || y > rect.bottom) continue;
+      const id = nodes[index].dataset.testid?.slice("block-".length);
+      return baseEvents.find((item) => item.id === id) ?? null;
+    }
+    return null;
+  }
+
+  function trackPan(pointerId: number, originY: number) {
+    const grid = gridRef.current;
+    if (!grid) return;
+    const scroller = grid;
+    const startScroll = scroller.scrollTop;
+    function move(native: PointerEvent) {
+      if (native.pointerId !== pointerId) return;
+      scroller.scrollTop = startScroll - (native.clientY - originY);
+    }
+    function up(native: PointerEvent) {
+      if (native.pointerId !== pointerId) return;
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", up);
+      window.removeEventListener("pointercancel", up);
+    }
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", up);
+    window.addEventListener("pointercancel", up);
+  }
+
+  function startGesture(event: CalEvent, pointer: { pointerId: number; clientX: number; clientY: number; pointerType: string }) {
+    if (gestureRef.current.phase !== "idle" && gestureRef.current.pointerId === pointer.pointerId) return;
+    gridRef.current?.querySelector<HTMLElement>(`[data-testid="block-${event.id}"]`)?.focus({ preventScroll: true });
     originRef.current = {
       id: event.id,
       startHour: event.startHour,
@@ -520,9 +554,27 @@ export function CalendarShell(props: Props) {
     setGesture(next);
     if (tip) setTip(false);
     const pointerId = pointer.pointerId;
+    const touch = pointer.pointerType === "touch";
+    let panning = false;
+    let panOriginY = pointer.clientY;
+    let panScroll = gridRef.current?.scrollTop ?? 0;
     function move(native: PointerEvent) {
       if (native.pointerId !== pointerId) return;
-      const updated = gestureMove(gestureRef.current, { x: native.clientX, y: native.clientY }, performance.now());
+      if (panning) {
+        if (gridRef.current) gridRef.current.scrollTop = panScroll - (native.clientY - panOriginY);
+        return;
+      }
+      const current = gestureRef.current;
+      const updated = gestureMove(current, { x: native.clientX, y: native.clientY }, performance.now());
+      if (touch && current.phase === "pending" && updated.phase === "idle") {
+        panning = true;
+        panOriginY = current.origin.y;
+        panScroll = gridRef.current?.scrollTop ?? 0;
+        gestureRef.current = updated;
+        if (gridRef.current) gridRef.current.scrollTop = panScroll - (native.clientY - panOriginY);
+        flushSync(() => setGesture(updated));
+        return;
+      }
       gestureRef.current = updated;
       flushSync(() => setGesture(updated));
     }
@@ -531,6 +583,11 @@ export function CalendarShell(props: Props) {
       window.removeEventListener("pointermove", move);
       window.removeEventListener("pointerup", up);
       window.removeEventListener("pointercancel", up);
+      if (panning) {
+        gestureRef.current = { phase: "idle" };
+        setGesture({ phase: "idle" });
+        return;
+      }
       const current = gestureRef.current;
       const point = current.phase === "idle"
         ? { x: native.clientX, y: native.clientY }
@@ -553,6 +610,23 @@ export function CalendarShell(props: Props) {
     window.addEventListener("pointermove", move);
     window.addEventListener("pointerup", up);
     window.addEventListener("pointercancel", up);
+  }
+
+  function onGridPointerDown(pointer: React.PointerEvent<HTMLDivElement>) {
+    if (pointer.button !== 0) return;
+    const hit = blockUnder(pointer.clientX, pointer.clientY);
+    if (hit) {
+      startGesture(hit, pointer);
+      return;
+    }
+    const target = pointer.target;
+    if (target instanceof Element && target.closest(".block, .slim")) return;
+    if (pointer.pointerType === "touch") trackPan(pointer.pointerId, pointer.clientY);
+  }
+
+  function onPointerDown(event: CalEvent, pointer: React.PointerEvent<HTMLButtonElement>) {
+    if (pointer.button !== 0) return;
+    startGesture(event, pointer);
   }
 
   function nudge(event: CalEvent, minutes: number, days: number) {
@@ -764,6 +838,7 @@ export function CalendarShell(props: Props) {
         data-origin={mode === "day" ? DAY_ORIGIN : WEEK_ORIGIN}
         data-gutter={mode === "day" ? DAY_GUTTER : WEEK_GUTTER}
         aria-busy={props.loading}
+        onPointerDownCapture={onGridPointerDown}
       >
         <div className="grid-canvas" style={{ height: mode === "day" ? dayY(20) : weekY(20) }}>
           {props.loading ? <div className="skeleton" aria-hidden="true"><i /><i /><i /></div> : null}
