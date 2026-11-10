@@ -80,3 +80,27 @@ test("PM1 a second quick drag while the first one saves is not thrown away", asy
   expect(lunch?.starts_at).not.toBe(lunchBefore.starts_at);
   expect(vendor?.starts_at, "second drag was saved").not.toBe(vendorBefore.starts_at);
 });
+
+test("PR1 moving a Proposed block outside Plan mode makes it Mike's decision", async ({ page }, testInfo) => {
+  const before = await readCalendar(page);
+  const budgetProposal = before.proposals.find((item) => item.kind === "calendar_block" && before.tasks.some((task) => task.id === item.payload.task_id && task.title === "Budget sheet"));
+  if (!budgetProposal) throw new Error("fixture missing");
+  const budget = block(page, "Budget sheet");
+  await expect(budget).toHaveAttribute("aria-label", /Proposed/);
+  await drag(page, "Budget sheet", 60);
+  const toast = page.getByTestId("plan-toast");
+  await expect(toast).toBeVisible();
+  await checkSaveClaim(page, {
+    case: "matches-server",
+    toast,
+    includes: ["Budget sheet → 3:00 PM"],
+    proposals: [{ id: budgetProposal.id, status: "approved" }],
+    blocks: [{ taskTitle: "Budget sheet", starts_at: "2026-11-10T20:00:00Z", ends_at: "2026-11-10T21:30:00Z" }],
+  });
+  const label = await block(page, "Budget sheet").getAttribute("aria-label");
+  await press(block(page, "Budget sheet"), testInfo.project.name);
+  const approveButtons = await page.getByRole("button", { name: "Approve", exact: true }).count();
+  const denyButtons = await page.getByRole("button", { name: "Deny", exact: true }).count();
+  expect(label ?? "", "no Proposed after Mike moves it").not.toMatch(/Proposed/);
+  expect(approveButtons + denyButtons, "no Approve/Deny after Mike moves it").toBe(0);
+});
