@@ -60,7 +60,7 @@ from tafo.tasks import (
 from datetime import timedelta
 
 from tafo.timeutil import parse_utc, utc_now
-from tafo.preview import PREVIEW_BANNER, mount_preview_ui, reseed_preview
+from tafo.preview import PREVIEW_BANNER, install_preview_gate, mount_preview_ui, reseed_preview
 from tafo.ui_session import UiSession
 from tafo.week import get_week, regenerate_week, save_week
 
@@ -175,7 +175,10 @@ def create_app(settings: Settings | None = None, adapter: CalendarAdapter | None
     async def lifespan(_app: FastAPI):
         if settings.preview:
             reseed_preview(settings)
-            print("TAFO preview: demo fixture on an ephemeral database. Google is disabled. This API has no authentication.")
+            if settings.preview_password.strip():
+                print("TAFO preview: demo fixture on an ephemeral database. Google is disabled. A shared password is required.")
+            else:
+                print("TAFO preview: PREVIEW_PASSWORD is unset. Every request except /api/health returns 503.")
         init_db(settings, adapter)
         if settings.calendar_mode == "demo":
             print("TAFO calendar mode: demo. Blocks are simulated and NOT synced to Google.")
@@ -229,6 +232,8 @@ def create_app(settings: Settings | None = None, adapter: CalendarAdapter | None
         if response.status_code == 200 and UiSession.should_issue(request):
             response.headers.append("set-cookie", UiSession.cookie_header(request.app.state.ui_session_token))
         return response
+
+    install_preview_gate(app, settings)
 
     @app.exception_handler(Problem)
     async def problem_handler(_request: Request, exc: Problem) -> JSONResponse:

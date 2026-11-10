@@ -1,5 +1,6 @@
 # Ready, not deployed. This job skips itself until the repository secret
-# FLY_API_TOKEN exists. It never sets Google credentials.
+# FLY_API_TOKEN exists. PREVIEW_PASSWORD is a Fly app secret, not an image build arg.
+# It never sets Google credentials.
 
 name: Fly preview
 
@@ -44,3 +45,4 @@ jobs:
           region: ${{ vars.FLY_REGION }}
           memory: "512"
           build_args: TAFO_REV=${{ github.event.pull_request.head.sha }}
+          secrets: PREVIEW_PASSWORD=${{ secrets.PREVIEW_PASSWORD }}

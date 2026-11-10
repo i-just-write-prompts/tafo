@@ -1,5 +1,6 @@
-# One image for a public review app. FastAPI serves the built UI and /api.
+# One image for a review app. FastAPI serves the built UI and /api.
 # Demo calendar only. The process reseeds a throwaway database on startup.
+# PREVIEW_PASSWORD is supplied at runtime and is not baked into the image.
 
 FROM node:22-bookworm-slim AS web
 WORKDIR /src/frontend

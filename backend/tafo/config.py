@@ -50,6 +50,7 @@ class Settings:
     human_edits_auto_approve: bool = True
     preview: bool = False
     static_dir: str = ""
+    preview_password: str = ""
 
     @classmethod
     def from_env(cls) -> Settings:
@@ -89,6 +90,7 @@ class Settings:
             human_edits_auto_approve=_flag(os.environ.get("TAFO_HUMAN_EDITS_AUTO_APPROVE"), True),
             preview=preview,
             static_dir=os.environ.get("TAFO_SERVE_STATIC_DIR", "").strip(),
+            preview_password=os.environ.get("PREVIEW_PASSWORD", "").strip() if preview else "",
         )
 
     def validate(self) -> None:
