@@ -50,7 +50,7 @@ import {
   weekTitle,
 } from "./format";
 import { COMMIT_PX, gestureDown, gestureMove, gestureUp, HOLD_MS, holdReady, type Gesture } from "./gesture";
-import { CheckGlyph, Chevron, MoreGlyph, PlanGlyph, SearchGlyph, Sparkle } from "./icons";
+import { CheckGlyph, Chevron, InfoGlyph, MoreGlyph, PlanGlyph, SearchGlyph, Sparkle } from "./icons";
 import { ALL_SHOWN, buildEvents, showSummary, visibleEvents, withMove, type CalEvent, type ShowFilters } from "./model";
 import { approveDisabled, conflictingMoveIds, enterPlan, exitPlan, includedIds, loadPlan, pendingProposalIds, proposalsOnDays, retainMoves, savePlan, stageMove, toggleSkip, type PlanSession, type StagedMove } from "./session";
 import { wrapWeekTitle } from "./titles";
@@ -784,9 +784,11 @@ export function CalendarShell(props: Props) {
   async function approveAll() {
     if (busy || approving.current || approveDisabled(plan.moves.length, included.length)) return;
     approving.current = true;
+    const blocked = new Set(conflictIds);
     const moves = [];
     const approvals = [];
     for (const move of plan.moves) {
+      if (blocked.has(move.id)) continue;
       const event = serverEvents.find((item) => item.id === move.id);
       if (!event) continue;
       if (event.kind === "proposal") {
@@ -815,6 +817,12 @@ export function CalendarShell(props: Props) {
       if (!event) continue;
       approvals.push({ proposal_id: id, expected_version: event.version });
     }
+    if (moves.length === 0 && approvals.length === 0) {
+      approving.current = false;
+      setOverlay(null);
+      pushToast(conflictText ? `${conflictText} changed, so nothing was saved.` : "Nothing to approve.");
+      return;
+    }
     setBusy(true);
     try {
       const committed = await api<{
@@ -833,11 +841,12 @@ export function CalendarShell(props: Props) {
       setPlan(kept);
       setOverrides({});
       setOverlay(null);
-      const savedMoves = committed.moves.filter((item) => item.saved).length;
-      const savedProposals = committed.approvals.filter((item) => item.saved).length;
+      const stagedIds = new Set(plan.moves.map((move) => move.id));
+      const savedMoves = [...committed.moves, ...committed.approvals].filter((item) => item.saved && stagedIds.has(item.item_id)).length;
+      const savedProposals = committed.approvals.filter((item) => item.saved && !stagedIds.has(item.item_id)).length;
       const unsavedTitles = [
         ...committed.moves.filter((item) => !item.saved).map((item) => item.item_title || "A move"),
-        ...committed.approvals.filter((item) => !item.saved).map((item) => item.item_title || "A proposal"),
+        ...committed.approvals.filter((item) => !item.saved).map((item) => plan.moves.find((move) => move.id === item.item_id)?.title || item.item_title || "A proposal"),
         ...missing.map((move) => move.title),
       ];
       const confirmed = await readCalendar();
@@ -923,7 +932,7 @@ export function CalendarShell(props: Props) {
           liveTitle={liveParts?.title ?? ""}
           liveWhen={liveParts?.when ?? ""}
           crossing={lifted && crossing}
-          conflict={conflictText ? `${conflictText} changed.` : ""}
+          conflict={conflictText ? `Changed · ${conflictText}` : ""}
           onExit={() => { setPlan(exitPlan()); setOverlay(null); }}
           onRevert={() => setOverlay({ kind: "revert" })}
           onReview={() => setOverlay({ kind: "review" })}
@@ -1075,10 +1084,8 @@ export function CalendarShell(props: Props) {
         <span className="v3-sr" style={{ position: "absolute", width: 1, height: 1, overflow: "hidden" }}>{live}</span>
         {toast ? (
           <div className="toast" data-testid="plan-toast" role="status">
-            <span className={toast.message.startsWith("Reverted") || toast.message.startsWith("Denied") ? "toast-icon plain" : "toast-icon"} aria-hidden="true">
-              <CheckGlyph />
-            </span>
-            <p>{toast.message}</p>
+            <ToastIcon message={toast.message} />
+            <ToastCopy message={toast.message} />
             {undo ? <button type="button" onClick={() => { const run = undo; setToast(null); setUndo(null); void run(); }}>Undo</button> : null}
           </div>
         ) : null}
@@ -1216,6 +1223,38 @@ function StatusBar({ framed, time, timeZone }: { framed: boolean; time: Date; ti
         <rect x="48" y="4" width="12" height="6" rx="1" fill="#EDEEF0" />
       </svg>
     </div>
+  );
+}
+
+function toastKind(message: string): "info" | "plain" | "ok" {
+  if (message.includes("still in plan")) return "info";
+  if (message.startsWith("Reverted") || message.startsWith("Denied")) return "plain";
+  return "ok";
+}
+
+function ToastIcon(props: { message: string }) {
+  const kind = toastKind(props.message);
+  return (
+    <span className={kind === "ok" ? "toast-icon" : `toast-icon ${kind}`} data-icon={kind} aria-hidden="true">
+      {kind === "info" ? <InfoGlyph /> : <CheckGlyph />}
+    </span>
+  );
+}
+
+function ToastCopy(props: { message: string }) {
+  const marker = " still in plan";
+  const at = props.message.lastIndexOf(marker);
+  if (at < 0) return <p>{props.message}</p>;
+  const head = props.message.slice(0, at);
+  const dot = head.lastIndexOf(" · ");
+  const count = dot < 0 ? "" : `${head.slice(0, dot)} · `;
+  const name = (dot < 0 ? head : head.slice(dot + 3)).trim();
+  return (
+    <p className="partial-line">
+      {count ? <span className="partial-count">{count}</span> : null}
+      {name ? <span className="partial-name">{name}</span> : null}
+      <span className="partial-keep" data-testid="toast-keep"> still in plan</span>
+    </p>
   );
 }
 
@@ -1419,6 +1458,7 @@ function EventButton(props: {
       style={{ left: tap.x, top: tap.y, width: tap.w, height: tap.h }}
       aria-label={eventLabel(event)}
       data-testid={`block-${event.id}`}
+      data-title={event.title}
       onPointerDown={(pointer) => props.onPointerDown(event, pointer)}
       onKeyDown={(key) => props.onKeyDown(event, key)}
       onClick={() => props.onOpen(event)}
@@ -1521,6 +1561,7 @@ function WeekCanvas(props: {
             style={{ left: painted.x + dx, top: moved.y, width: painted.w, height: moved.h }}
             aria-label={eventLabel(event)}
             data-testid={`block-${event.id}`}
+            data-title={event.title}
             onPointerDown={(pointer) => props.onPointerDown(event, pointer)}
             onKeyDown={(key) => props.onKeyDown(event, key)}
             onClick={() => props.onOpen(event)}
@@ -1708,7 +1749,7 @@ function ReviewSheet(props: {
 }) {
   const proposals = props.proposals;
   return (
-    <div className="sheet" role="dialog" aria-label="Review plan">
+    <div className="sheet" role="dialog" aria-label="Review plan" data-testid="review-sheet">
       <div className="sheet-grip" />
       <h2>Review plan</h2>
       <p className="sub">Your moves and the agent's {proposals.length === 1 ? "suggestion" : "suggestions"} save together. Skip anything you don't want.</p>
@@ -1720,7 +1761,7 @@ function ReviewSheet(props: {
         const to = withMove(event, move.to.start, move.to.end, props.timeZone);
         const crosses = crossesWorkHours(event.domain, PlanTime.weekdayIndex(from.dayKey), from.startHour, from.endHour, PlanTime.weekdayIndex(to.dayKey), to.startHour, to.endHour);
         return (
-          <div key={move.id} className="row">
+          <div key={move.id} className="row" data-testid={`plan-item-${move.id}`} data-title={event.title}>
             <i className="swatch" style={{ background: line(event.domain) }} />
             <span>
               <strong>{event.title}</strong>
@@ -1735,7 +1776,7 @@ function ReviewSheet(props: {
       {proposals.map((event) => {
         const skipped = props.skipped.includes(event.id);
         return (
-          <div key={event.id} className={skipped ? "row skipped" : "row"}>
+          <div key={event.id} className={skipped ? "row skipped" : "row"} data-testid={`plan-item-${event.id}`} data-title={event.title}>
             <i className="swatch" style={{ background: "transparent", border: `1px dashed ${line(event.domain)}` }} />
             <span style={{ color: line(event.domain) }}>
               <strong>{event.title}</strong>
@@ -1747,7 +1788,7 @@ function ReviewSheet(props: {
           </div>
         );
       })}
-      <button type="button" className="primary" disabled={props.disabled} onClick={props.onApprove}>{props.label}</button>
+      <button type="button" className="primary" data-testid="approve-all" disabled={props.disabled} onClick={props.onApprove}>{props.label}</button>
       <button type="button" className="quiet" onClick={props.onKeep}>Keep planning</button>
     </div>
   );

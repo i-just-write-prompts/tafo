@@ -27,6 +27,15 @@ IDEM_RE = re.compile(r"^[A-Za-z0-9_.:-]{6,120}$")
 TASK_FIELDS = {"title", "domain", "status", "estimate_hours", "due_date", "notes", "on_today"}
 
 
+def _same_span(left: str, right: str) -> bool:
+    if not left or not right:
+        return False
+    try:
+        return parse_utc(left) == parse_utc(right)
+    except Problem:
+        return left == right
+
+
 def _loads(value: str | None):
     if not value:
         return None
@@ -652,10 +661,15 @@ def commit_plan(
         payload = normalize_calendar(conn, raw, editor="human", settings=settings, kind="calendar_update")
         explanation = f"Moved {move['title']} in plan mode."
         existing = conn.execute(
-            "SELECT id FROM proposals WHERE idempotency_key = ?",
+            "SELECT * FROM proposals WHERE idempotency_key = ?",
             (move["idempotency_key"],),
         ).fetchone()
-        if existing is None and block["version"] != move["expected_version"]:
+        unsynced_replay = False
+        if existing is not None:
+            prior = outbox_for_proposal(conn, existing["id"])
+            status = None if prior is None else prior["status"]
+            unsynced_replay = status not in {"simulated", "synced"}
+        if (existing is None or unsynced_replay) and block["version"] != move["expected_version"]:
             raise Problem(409, "version_conflict", f"{move['title']} changed, so nothing was saved.", current_version=block["version"])
         proposal_id, version, replay_insert = _insert_human_update(
             conn,
@@ -678,16 +692,28 @@ def commit_plan(
 
     staged_approvals = []
     for approval in approvals:
+        row = conn.execute("SELECT * FROM proposals WHERE id = ?", (approval["proposal_id"],)).fetchone()
+        if row is None:
+            raise Problem(404, "not_found", "Proposal not found.")
         version = int(approval["expected_version"])
         if approval.get("starts_at") and approval.get("ends_at"):
-            version = _retime_proposal(
-                conn,
-                settings,
-                approval["proposal_id"],
-                version,
-                approval["starts_at"],
-                approval["ends_at"],
-            )
+            if row["status"] == "approved":
+                current = effective_payload(row)
+                same = _same_span(str(current.get("starts_at") or ""), approval["starts_at"]) and _same_span(
+                    str(current.get("ends_at") or ""), approval["ends_at"]
+                )
+                if not same:
+                    raise Problem(409, "not_pending", "Only a pending proposal can be edited.")
+                version = int(row["version"])
+            else:
+                version = _retime_proposal(
+                    conn,
+                    settings,
+                    approval["proposal_id"],
+                    version,
+                    approval["starts_at"],
+                    approval["ends_at"],
+                )
         staged_approvals.append(
             stage_approval(
                 conn,

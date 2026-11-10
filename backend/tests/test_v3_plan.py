@@ -341,6 +341,223 @@ def test_repeating_a_commit_with_the_same_key_changes_nothing(tmp_path):
         client.__exit__(None, None, None)
 
 
+def _failed_result():
+    from tafo.calendar_adapter import AdapterResult
+
+    return AdapterResult(
+        ok=False,
+        status="failed",
+        sync_state="not_synced",
+        google_event_id=None,
+        honest_label="Not synced. The calendar write failed.",
+        steps=[],
+        error="forced_failure",
+        mode="demo",
+    )
+
+
+def test_r4_stale_same_key_replay_returns_409_and_keeps_newer_time(tmp_path):
+    from tafo.calendar_adapter import build_adapter
+
+    settings = settings_for(tmp_path)
+    V3Week.load(settings.db_path)
+    inner = build_adapter(settings)
+
+    class Gate:
+        mode = "demo"
+
+        def __init__(self):
+            self.updates: set[str] = set()
+
+        def read_busy(self, *args, **kwargs):
+            return inner.read_busy(*args, **kwargs)
+
+        def create_block(self, *args, **kwargs):
+            return inner.create_block(*args, **kwargs)
+
+        def cancel_block(self, *args, **kwargs):
+            return inner.cancel_block(*args, **kwargs)
+
+        def update_block(self, event_key, payload, known_google_id=None):
+            if event_key in self.updates:
+                self.updates.discard(event_key)
+                return _failed_result()
+            return inner.update_block(event_key, payload, known_google_id)
+
+    gate = Gate()
+    client = TestClient(create_app(settings, adapter=gate))
+    client.__enter__()
+    try:
+        spec = block_named(client, "Spec review")
+        gate.updates.add(spec["id"])
+        first = {
+            "block_id": spec["id"],
+            "expected_version": spec["version"],
+            "starts_at": local(2, 9, 30),
+            "ends_at": local(2, 11),
+            "idempotency_key": "v3-plan-spec-first",
+            "title": "Spec review",
+        }
+        failed = client.post("/api/decisions/plan/commit", json={"confirmed": True, "moves": [first], "approvals": []})
+        assert failed.status_code == 200, failed.text
+        assert failed.json()["moves"][0]["saved"] is False
+        assert block_named(client, "Spec review")["starts_at"] == spec["starts_at"]
+        newer = client.post(
+            "/api/decisions/plan/commit",
+            json={
+                "confirmed": True,
+                "moves": [{
+                    "block_id": spec["id"],
+                    "expected_version": spec["version"],
+                    "starts_at": local(2, 13),
+                    "ends_at": local(2, 14, 30),
+                    "idempotency_key": "v3-plan-spec-newer",
+                    "title": "Spec review",
+                }],
+                "approvals": [],
+            },
+        )
+        assert newer.status_code == 200, newer.text
+        assert block_named(client, "Spec review")["starts_at"] == local(2, 13)
+        replay = client.post("/api/decisions/plan/commit", json={"confirmed": True, "moves": [first], "approvals": []})
+        assert replay.status_code == 409
+        assert replay.json()["detail"]["code"] == "version_conflict"
+        assert block_named(client, "Spec review")["starts_at"] == local(2, 13)
+    finally:
+        client.__exit__(None, None, None)
+
+
+def test_r5_unsynced_moved_proposal_does_not_block_healthy_moves(tmp_path):
+    from tafo.calendar_adapter import build_adapter
+
+    settings = settings_for(tmp_path)
+    V3Week.load(settings.db_path)
+    inner = build_adapter(settings)
+
+    class Gate:
+        mode = "demo"
+
+        def __init__(self):
+            self.creates = 1
+
+        def read_busy(self, *args, **kwargs):
+            return inner.read_busy(*args, **kwargs)
+
+        def update_block(self, *args, **kwargs):
+            return inner.update_block(*args, **kwargs)
+
+        def cancel_block(self, *args, **kwargs):
+            return inner.cancel_block(*args, **kwargs)
+
+        def create_block(self, *args, **kwargs):
+            if self.creates:
+                self.creates -= 1
+                return _failed_result()
+            return inner.create_block(*args, **kwargs)
+
+    gate = Gate()
+    client = TestClient(create_app(settings, adapter=gate))
+    client.__enter__()
+    try:
+        budget = proposal_named(client, "Budget sheet")
+        spec = block_named(client, "Spec review")
+        moved_start = local(1, 15)
+        moved_end = local(1, 16, 30)
+        first = client.post(
+            "/api/decisions/plan/commit",
+            json={
+                "confirmed": True,
+                "moves": [],
+                "approvals": [{
+                    "proposal_id": budget["id"],
+                    "expected_version": budget["version"],
+                    "starts_at": moved_start,
+                    "ends_at": moved_end,
+                }],
+            },
+        )
+        assert first.status_code == 200, first.text
+        assert first.json()["approvals"][0]["saved"] is False
+        assert proposal_named(client, "Budget sheet")["status"] == "approved"
+        second = client.post(
+            "/api/decisions/plan/commit",
+            json={
+                "confirmed": True,
+                "moves": [{
+                    "block_id": spec["id"],
+                    "expected_version": spec["version"],
+                    "starts_at": local(2, 9, 30),
+                    "ends_at": local(2, 11),
+                    "idempotency_key": "v3-plan-spec-healthy",
+                    "title": "Spec review",
+                }],
+                "approvals": [{
+                    "proposal_id": budget["id"],
+                    "expected_version": budget["version"],
+                    "starts_at": moved_start,
+                    "ends_at": moved_end,
+                }],
+            },
+        )
+        assert second.status_code == 200, second.text
+        assert block_named(client, "Spec review")["starts_at"] == local(2, 9, 30)
+        task_id = budget["payload"]["task_id"]
+        written = [
+            row for row in client.get("/api/calendar/blocks").json()["blocks"]
+            if row["task_id"] == task_id and row["status"] == "scheduled"
+        ]
+        assert any(row["starts_at"] == moved_start for row in written)
+    finally:
+        client.__exit__(None, None, None)
+
+
+def test_demo_fail_writes_endpoint_fails_one_update_and_live_omits_it(tmp_path):
+    client = open_week(tmp_path)
+    try:
+        spec = block_named(client, "Spec review")
+        armed = client.post("/api/e2e/fail-writes", json={"event_keys": [spec["id"]], "fail_creates": 1})
+        assert armed.status_code == 200, armed.text
+        assert armed.json()["event_keys"] == [spec["id"]]
+        assert armed.json()["fail_creates"] == 1
+        failed = client.post(
+            "/api/decisions/plan/commit",
+            json={
+                "confirmed": True,
+                "moves": [{
+                    "block_id": spec["id"],
+                    "expected_version": spec["version"],
+                    "starts_at": local(2, 9, 30),
+                    "ends_at": local(2, 11),
+                    "idempotency_key": "v3-demo-fail-writes",
+                    "title": "Spec review",
+                }],
+                "approvals": [],
+            },
+        )
+        assert failed.status_code == 200, failed.text
+        assert failed.json()["moves"][0]["saved"] is False
+        assert block_named(client, "Spec review")["starts_at"] == spec["starts_at"]
+    finally:
+        client.__exit__(None, None, None)
+
+    live = Settings(
+        host="127.0.0.1",
+        port=8787,
+        data_dir=tmp_path,
+        db_path=tmp_path / "live.sqlite",
+        display_timezone="America/Indianapolis",
+        calendar_mode="live",
+        google_credentials_file="",
+        google_calendar_id="cal-demo",
+        work_invite_email="worker@example.com",
+        allow_lan=False,
+        seed_demo=False,
+    )
+    with TestClient(create_app(live)) as live_client:
+        missing = live_client.post("/api/e2e/fail-writes", json={"event_keys": ["blk_v3_spec"]})
+        assert missing.status_code == 404
+
+
 def test_commit_refuses_an_empty_plan(tmp_path):
     client = open_week(tmp_path)
     try:

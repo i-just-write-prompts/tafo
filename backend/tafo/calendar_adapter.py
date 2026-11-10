@@ -188,6 +188,50 @@ class DemoCalendarAdapter:
         return _demo_ok("Simulated cancel. Nothing was deleted on Google.")
 
 
+class DemoFaults:
+    """Test-only switch on a demo adapter. Live mode never wraps this."""
+
+    def __init__(self, inner: CalendarAdapter) -> None:
+        self.inner = inner
+        self.mode = getattr(inner, "mode", "demo")
+        self.fail_keys: set[str] = set()
+        self.fail_creates = 0
+
+    def clear(self) -> None:
+        self.fail_keys.clear()
+        self.fail_creates = 0
+
+    def _failed(self) -> AdapterResult:
+        return AdapterResult(
+            ok=False,
+            status="failed",
+            sync_state="not_synced",
+            google_event_id=None,
+            honest_label="Not synced. The calendar write failed.",
+            steps=[],
+            error="forced_failure",
+            mode="demo",
+        )
+
+    def read_busy(self, start: datetime, end: datetime) -> list[BusyInterval]:
+        return self.inner.read_busy(start, end)
+
+    def create_block(self, event_key: str, payload: dict, known_google_id: str | None = None) -> AdapterResult:
+        if self.fail_creates > 0:
+            self.fail_creates -= 1
+            return self._failed()
+        return self.inner.create_block(event_key, payload, known_google_id)
+
+    def update_block(self, event_key: str, payload: dict, known_google_id: str | None = None) -> AdapterResult:
+        if event_key in self.fail_keys:
+            self.fail_keys.discard(event_key)
+            return self._failed()
+        return self.inner.update_block(event_key, payload, known_google_id)
+
+    def cancel_block(self, event_key: str, payload: dict, known_google_id: str | None = None) -> AdapterResult:
+        return self.inner.cancel_block(event_key, payload, known_google_id)
+
+
 class UnconfiguredCalendarAdapter:
     """Live mode without credentials. Fails closed and does not pretend to sync."""
 

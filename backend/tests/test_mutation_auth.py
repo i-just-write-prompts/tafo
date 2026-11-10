@@ -1,6 +1,9 @@
 """Every mutating route rejects a caller who is not the local person.
 
-Decision routes need the UI session. Every other mutation rejects an agent.
+Decision routes (approve, deny, edit, plan commit) need the UI session cookie.
+Every other mutation rejects an explicit agent and treats a missing actor as
+the local person, so POST /api/tasks with no cookie is 201. That split is
+intentional: this API has no login, and the cookie only gates calendar decisions.
 POST /api/hermes/proposals stays the one agent write.
 """
 
@@ -23,6 +26,7 @@ BODIES = {
     ("POST", "/api/decisions/{proposal_id}/edit"): {"expected_version": 1, "confirmed": True, "payload": {}},
     ("POST", "/api/decisions/{proposal_id}/reject"): {"expected_version": 1, "confirmed": True},
     ("POST", "/api/calendar/outbox/{outbox_id}/retry"): None,
+    ("POST", "/api/e2e/fail-writes"): {"event_keys": []},
     ("POST", "/api/admin/backup"): None,
     ("POST", "/api/admin/restore"): {"confirm": "REPLACE_LOCAL_DATA", "snapshot": {}},
 }
@@ -98,3 +102,13 @@ def test_every_mutation_rejects_an_agent_and_decisions_require_a_session(client)
     assert client.get("/api/calendar/blocks").json() == blocks
     assert client.get("/api/hermes/proposals").json() == proposals
     assert client.get("/api/tasks").json() == tasks
+
+    # No cookie and no actor header. Tasks stay open to the local person.
+    created = client.post("/api/tasks", json={"title": "Local person", "domain": "work"})
+    assert created.status_code == 201, created.text
+    denied = client.post(
+        "/api/decisions/plan/commit",
+        json={"confirmed": True, "moves": [], "approvals": []},
+    )
+    assert denied.status_code == 403
+    assert denied.json()["detail"]["code"] == "ui_session_required"

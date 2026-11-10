@@ -14,7 +14,7 @@ from tafo.audit import list_audit
 from tafo.availability import availability_report, suggest_slot
 from tafo.backup import export_snapshot, restore_snapshot, write_backup_file
 from tafo.blocks import get_block, list_blocks
-from tafo.calendar_adapter import OUTLOOK_GAP, CalendarAdapter, build_adapter
+from tafo.calendar_adapter import OUTLOOK_GAP, CalendarAdapter, DemoFaults, build_adapter
 from tafo.config import Settings, host_is_loopback
 from tafo.db import connect, read_session, session
 from tafo.decisions import (
@@ -200,6 +200,10 @@ def create_app(settings: Settings | None = None, adapter: CalendarAdapter | None
     settings.validate()
     if adapter is None:
         adapter = build_adapter(settings)
+    demo_faults = None
+    if settings.calendar_mode == "demo":
+        demo_faults = DemoFaults(adapter)
+        adapter = demo_faults
     ui_session_token = UiSession.mint()
 
     @asynccontextmanager
@@ -230,6 +234,16 @@ def create_app(settings: Settings | None = None, adapter: CalendarAdapter | None
     )
     app.state.settings = settings
     app.state.adapter = adapter
+    app.state.demo_faults = demo_faults
+    if demo_faults is not None:
+        @app.post("/api/e2e/fail-writes", tags=["e2e"])
+        def fail_writes(body: dict, request: Request) -> dict:
+            """Arm the next demo calendar write to fail. Absent unless calendar mode is demo."""
+            _require_human(request)
+            keys = body.get("event_keys") or []
+            demo_faults.fail_keys.update(str(key) for key in keys)
+            demo_faults.fail_creates += int(body.get("fail_creates") or 0)
+            return {"ok": True, "event_keys": sorted(demo_faults.fail_keys), "fail_creates": demo_faults.fail_creates}
     app.state.ui_session_token = ui_session_token
     app.add_middleware(
         CORSMiddleware,

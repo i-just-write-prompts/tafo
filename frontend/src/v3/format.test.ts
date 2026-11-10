@@ -50,7 +50,8 @@ describe("v3 clock copy", () => {
     expect(approveLabel(4, 0)).toBe("Approve all · 4 moves");
     expect(approveLabel(1, 2)).toBe("Approve all · 1 move + 2 proposals");
     expect(approvedToast(4, 1)).toBe("Approved 4 moves + 1 proposal");
-    expect(partialPlanToast(2, 3, ["Spec review"])).toBe("Saved 2 of 3. Spec review isn't synced and is still in your plan.");
-    expect(partialPlanToast(0, 1, ["Spec review"])).not.toContain("Nothing was changed");
+    expect(partialPlanToast(2, 3, ["Spec review"])).toBe("Saved 2 of 3 · Spec review still in plan");
+    expect(partialPlanToast(0, 1, ["Spec review"])).toBe("Spec review still in plan");
+    expect(partialPlanToast(1, 2, ["Spec review", "Budget sheet"])).toBe("Saved 1 of 2 · Spec review and Budget sheet still in plan");
   });
 });

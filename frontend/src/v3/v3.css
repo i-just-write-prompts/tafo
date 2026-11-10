@@ -530,6 +530,7 @@ body { margin: 0; background: #0a0b0d; }
   background: transparent;
   touch-action: none;
 }
+.tray-sheet[data-open="1"] ~ .v3-tray .tray-grip::before { visibility: hidden; }
 .v3-tray .tray-grip::before,
 .tray-sheet .tray-grip::before {
   content: "";
@@ -732,6 +733,14 @@ body { margin: 0; background: #0a0b0d; }
   text-overflow: ellipsis;
   min-width: 0;
 }
+.toast p.partial-line {
+  display: flex;
+  align-items: baseline;
+  flex: 1;
+  text-overflow: clip;
+}
+.partial-count, .partial-keep { flex: none; white-space: nowrap; }
+.partial-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .toast button { min-width: 64px; height: 44px; padding: 0 14px; font-weight: 600; border-left: 1px solid #3a3e45; }
 .toast-icon {
   width: 18px;
@@ -745,6 +754,7 @@ body { margin: 0; background: #0a0b0d; }
 }
 .toast-icon svg { width: 12px; height: 12px; }
 .toast-icon.plain { background: #33363d; color: var(--t1); }
+.toast-icon.info { background: #3a4458; color: #d7dee8; }
 
 .tip {
   position: absolute;

@@ -42,6 +42,15 @@ export function CheckGlyph() {
   );
 }
 
+export function InfoGlyph() {
+  return (
+    <svg viewBox="0 0 12 12" aria-hidden="true">
+      <circle cx="6" cy="3.1" r="0.9" fill="currentColor" />
+      <path d="M6 5.2v4.2" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
+    </svg>
+  );
+}
+
 export function SearchGlyph() {
   return (
     <svg viewBox="0 0 24 24" aria-hidden="true">

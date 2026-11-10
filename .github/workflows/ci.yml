@@ -21,7 +21,7 @@ jobs:
         run: python -m pip install -e "backend[dev]"
       - name: Pytest
         working-directory: backend
-        run: python -m pytest
+        run: python -m pytest -v
 
   frontend:
     runs-on: ubuntu-latest

@@ -1,6 +1,31 @@
 import { expect, test, type Locator, type Page, type Route } from "@playwright/test";
 
+import { armWriteFailure, checkSaveClaim, readCalendar, uiWhen } from "./helpers/saveClaim";
 import { block, center, dragHold, openDay, press, reseed, shot } from "./support";
+
+async function titleLayout(button: Locator) {
+  await expect(button).toBeVisible();
+  const blockBox = await button.boundingBox();
+  if (!blockBox) throw new Error("block missing");
+  const lines = button.locator("strong");
+  const count = await lines.count();
+  expect(count).toBeGreaterThan(0);
+  const laid = [];
+  for (let index = 0; index < count; index += 1) {
+    const line = lines.nth(index);
+    await expect(line).toBeVisible();
+    const box = await line.boundingBox();
+    if (!box) throw new Error("title line missing");
+    const text = (await line.textContent()) || "";
+    expect(box.height).toBeGreaterThanOrEqual(8);
+    expect(box.width).toBeGreaterThan(0);
+    expect(box.y).toBeGreaterThanOrEqual(blockBox.y - 1);
+    expect(box.y + box.height).toBeLessThanOrEqual(blockBox.y + blockBox.height + 1);
+    if (index > 0) expect(box.y).toBeGreaterThanOrEqual(laid[index - 1].y + laid[index - 1].height - 1);
+    laid.push({ ...box, text });
+  }
+  return { texts: laid.map((line) => line.text), lines: laid, block: blockBox };
+}
 
 async function expectOneLine(toast: Locator) {
   const line = await toast.locator("p").boundingBox();
@@ -90,6 +115,7 @@ test("opens on Day", async ({ page }, testInfo) => {
   await expect(page.getByTestId("view-switch")).toContainText("Day");
   await expect(page.getByTestId("sync-chip")).toContainText("Demo · not synced");
   await expect(page.getByRole("button", { name: /Call vendor/ })).toBeVisible();
+  await expect(page.getByTestId("block-blk_v3_spec")).toHaveAttribute("data-title", "Spec review");
   await expect(page.getByRole("button", { name: "Approve", exact: true })).toHaveCount(0);
   await expect(page.getByRole("button", { name: "Deny", exact: true })).toHaveCount(0);
   await shot(page, testInfo, "opens-on-day");
@@ -103,11 +129,12 @@ test("quick drag saves with a toast and Undo", async ({ page }, testInfo) => {
   const gridBefore = await grid.boundingBox();
   await dragHold(page, start.x, start.y, start.x, start.y + 60);
   const toast = page.getByTestId("plan-toast");
-  await expect(toast).toContainText("Call vendor → 11:00 AM");
-  const savedVendor = await calendarState(page);
-  const vendorBlock = savedVendor.blocks.find((item) => item.title === "Call vendor");
-  expect(vendorBlock && uiWhen(vendorBlock.starts_at)).toContain("Tue, Nov 10");
-  expect(new Intl.DateTimeFormat("en-US", { timeZone: "America/Indianapolis", hour: "numeric", minute: "2-digit", hour12: true }).format(new Date(vendorBlock!.starts_at))).toBe("11:00 AM");
+  await checkSaveClaim(page, {
+    case: "matches-server",
+    toast,
+    includes: ["Call vendor → 11:00 AM"],
+    blocks: [{ title: "Call vendor", starts_at: "2026-11-10T16:00:00Z", ends_at: "2026-11-10T16:30:00Z" }],
+  });
   const undo = toast.getByRole("button", { name: "Undo" });
   await expect(undo).toBeVisible();
   const undoBox = await undo.boundingBox();
@@ -621,13 +648,22 @@ test("B2 week and day overlaps stay side by side", async ({ page }, testInfo) =>
 test("B3 calendar toggle keeps the week title wrap", async ({ page }, testInfo) => {
   await press(page.getByTestId("view-switch"), testInfo.project.name);
   await press(page.getByRole("menuitem", { name: "Week" }), testInfo.project.name);
-  const before = await block(page, "Design crit").locator("strong").allTextContents();
-  expect(before.join("")).toContain("Design");
+  const design = block(page, "Design crit");
+  const before = await titleLayout(design);
+  expect(before.texts.join("")).toContain("Design");
+  expect(before.block.width).toBeGreaterThan(8);
   await press(page.getByTestId("more-button"), testInfo.project.name);
   await press(page.getByRole("menuitem", { name: /Show/ }), testInfo.project.name);
   await press(page.getByRole("button", { name: "Personal" }), testInfo.project.name);
-  const after = await block(page, "Design crit").locator("strong").allTextContents();
-  expect(after).toEqual(before);
+  await expect(block(page, "Coffee w/ Jo")).toHaveCount(0);
+  const after = await titleLayout(design);
+  expect(after.texts).toEqual(before.texts);
+  expect(after.lines.length).toBe(before.lines.length);
+  expect(after.block.width).toBeGreaterThan(before.block.width + 4);
+  if (testInfo.project.name === "phone" || testInfo.project.name === "s23") {
+    expect(before.lines.length).toBeGreaterThan(1);
+    expect(after.lines[1].y).toBeGreaterThanOrEqual(after.lines[0].y + after.lines[0].height - 1);
+  }
 });
 
 test("B4 tray info tap and grip drag", async ({ page }, testInfo) => {
@@ -637,6 +673,8 @@ test("B4 tray info tap and grip drag", async ({ page }, testInfo) => {
   const sheet = page.getByTestId("tray-sheet");
   await expect(sheet).toHaveAttribute("data-open", "1");
   await expect(sheet).toHaveCSS("transition-duration", "0s");
+  const trayBar = () => page.locator(".v3-tray .tray-grip").evaluate((node) => getComputedStyle(node, "::before").visibility);
+  expect(await trayBar()).toBe("hidden");
   await expect(sheet.getByText("Buy stamps")).toBeVisible();
   await expect(sheet.getByRole("heading", { name: "Demo · not synced" })).toBeVisible();
   const after = await grid.boundingBox();
@@ -653,6 +691,7 @@ test("B4 tray info tap and grip drag", async ({ page }, testInfo) => {
   const y = gripBox.y + gripBox.height / 2;
   await dragGrip(page, testInfo.project.name, x, y, 80);
   await expect(sheet).toHaveAttribute("data-open", "0");
+  expect(await trayBar()).toBe("visible");
 
   await dragGrip(page, testInfo.project.name, x, y, -80);
   await expect(sheet).toHaveAttribute("data-open", "1");
@@ -764,29 +803,7 @@ test("B6 moving a proposal decides it and revert restores it", async ({ page }, 
   await expect(page.getByTestId("plan-banner")).toHaveCount(0);
 });
 
-async function calendarState(page: Page) {
-  const blocks = await (await page.request.get("/api/calendar/blocks")).json() as {
-    blocks: Array<{ id: string; title: string; starts_at: string; ends_at: string; status: string }>;
-  };
-  const proposals = await (await page.request.get("/api/hermes/proposals")).json() as {
-    proposals: Array<{ id: string; status: string; kind: string; payload: { task_id?: string } }>;
-  };
-  const tasks = await (await page.request.get("/api/tasks?view=all&scope=all")).json() as {
-    tasks: Array<{ id: string; title: string }>;
-  };
-  return { blocks: blocks.blocks, proposals: proposals.proposals, tasks: tasks.tasks };
-}
-
-function uiWhen(iso: string) {
-  const parts = new Intl.DateTimeFormat("en-US", {
-    timeZone: "America/Indianapolis",
-    weekday: "short",
-    month: "short",
-    day: "numeric",
-  }).formatToParts(new Date(iso));
-  const part = (type: string) => parts.find((item) => item.type === type)?.value ?? "";
-  return `${part("weekday")}, ${part("month")} ${part("day")}`;
-}
+const calendarState = readCalendar;
 
 test("V1 a moved proposal leaves the list and the counts agree", async ({ page }, testInfo) => {
   await press(page.getByTestId("view-switch"), testInfo.project.name);
@@ -807,6 +824,40 @@ test("V1 a moved proposal leaves the list and the counts agree", async ({ page }
   await expect(dialog).toContainText("Budget sheet");
   await expect(dialog).not.toContainText("Proposed · Tue 2:00–3:30 PM");
   await expect(dialog).toContainText("Proposed · Tue 5:00–6:00 PM");
+});
+
+test("N1 the approve toast matches the review classification", async ({ page }, testInfo) => {
+  const before = await calendarState(page);
+  const specBefore = before.blocks.find((item) => item.title === "Spec review");
+  if (!specBefore) throw new Error("spec missing");
+  await press(page.getByTestId("view-switch"), testInfo.project.name);
+  await press(page.getByRole("menuitem", { name: "Week" }), testInfo.project.name);
+  await press(page.getByRole("button", { name: "Plan mode" }), testInfo.project.name);
+  const spec = block(page, "Spec review");
+  await spec.scrollIntoViewIfNeeded();
+  const specAt = await center(spec);
+  const column = await page.locator(".workband").first().evaluate((node) => node.getBoundingClientRect().width);
+  await uiDrag(page, testInfo.project.name, specAt.x, specAt.y, specAt.x + column, specAt.y);
+  const budget = block(page, "Budget sheet");
+  await budget.scrollIntoViewIfNeeded();
+  const budgetAt = await center(budget);
+  await uiDrag(page, testInfo.project.name, budgetAt.x, budgetAt.y, budgetAt.x, budgetAt.y + 70);
+  const staged = JSON.parse(await page.evaluate(() => localStorage.getItem("tafo.v3.plan.v2") || "null"));
+  const specMove = staged.moves.find((item: { id: string }) => item.id === specBefore.id);
+  await press(page.getByRole("button", { name: "Review", exact: true }), testInfo.project.name);
+  const button = page.getByRole("button", { name: /Approve all/ });
+  await expect(button).toHaveText("Approve all · 2 moves + 1 proposal");
+  const review = (await button.innerText()).replace(/\s+/g, " ").trim();
+  await press(button, testInfo.project.name);
+  const toast = page.getByTestId("plan-toast");
+  await checkSaveClaim(page, {
+    case: "matches-server",
+    toast,
+    includes: ["Approved 2 moves + 1 proposal"],
+    blocks: [{ id: specBefore.id, starts_at: specMove.to.start, ends_at: specMove.to.end }],
+  });
+  const toastText = (await toast.locator("p").innerText()).replace(/\s+/g, " ").trim();
+  expect(toastText.replace(/^Approved /, "")).toBe(review.replace(/^Approve all · /, ""));
 });
 
 test("V2 approve all persists and the toast matches the server", async ({ page }, testInfo) => {
@@ -882,21 +933,125 @@ test("R1 a failed calendar write stays in the plan", async ({ page }, testInfo) 
   const column = await page.locator(".workband").first().evaluate((node) => node.getBoundingClientRect().width);
   await uiDrag(page, testInfo.project.name, at.x, at.y, at.x + column, at.y);
   await expect(page.getByTestId("plan-banner")).toContainText("1 move");
-  const armed = await page.request.post("/api/e2e/fail-writes", { data: { event_keys: [specBefore.id] } });
-  expect(armed.ok()).toBeTruthy();
+  await armWriteFailure(page, [specBefore.id]);
   await press(page.getByRole("button", { name: "Review", exact: true }), testInfo.project.name);
   await press(page.getByRole("button", { name: /Approve all/ }), testInfo.project.name);
   const toast = page.getByTestId("plan-toast");
-  await expect(toast).toContainText("Spec review isn't synced and is still in your plan");
-  await expect(toast).toContainText("Saved 2 of 3");
-  await expect(toast).not.toContainText("Nothing was changed");
-  const after = await calendarState(page);
-  const specRow = after.blocks.find((item) => item.id === specBefore.id);
-  expect(specRow?.starts_at).toBe(specBefore.starts_at);
-  expect(after.proposals.find((item) => item.id === closetBefore.id)?.status).toBe("approved");
+  await checkSaveClaim(page, {
+    case: "forced-failure",
+    toast,
+    includes: ["Saved 2 of 3 · Spec review still in plan"],
+    excludes: ["Nothing was changed"],
+    blocks: [{ id: specBefore.id, starts_at: specBefore.starts_at }],
+    proposals: [{ id: closetBefore.id, status: "approved" }],
+  });
   const draft = JSON.parse(await page.evaluate(() => localStorage.getItem("tafo.v3.plan.v2") || "null"));
   expect(draft.moves.map((item: { id: string }) => item.id)).toEqual([specBefore.id]);
   expect(draft.active).toBe(true);
+  if (testInfo.project.name === "s23") {
+    const keep = page.getByTestId("toast-keep");
+    await expect(keep).toBeVisible();
+    await expect(keep).toHaveText("still in plan");
+    const clip = await keep.evaluate((el) => ({ sw: el.scrollWidth, cw: el.clientWidth }));
+    expect(clip.sw).toBeLessThanOrEqual(clip.cw);
+    await expect(page.getByTestId("plan-toast").locator(".toast-icon")).toHaveAttribute("data-icon", "info");
+  }
+});
+
+test("R4 client skips a Changed move and keeps the newer time", async ({ page }, testInfo) => {
+  const before = await calendarState(page);
+  const specBefore = before.blocks.find((item) => item.title === "Spec review");
+  if (!specBefore) throw new Error("spec missing");
+  await press(page.getByTestId("view-switch"), testInfo.project.name);
+  await press(page.getByRole("menuitem", { name: "Week" }), testInfo.project.name);
+  await press(page.getByRole("button", { name: "Plan mode" }), testInfo.project.name);
+  const spec = block(page, "Spec review");
+  await spec.scrollIntoViewIfNeeded();
+  const at = await center(spec);
+  const column = await page.locator(".workband").first().evaluate((node) => node.getBoundingClientRect().width);
+  await uiDrag(page, testInfo.project.name, at.x, at.y, at.x + column, at.y);
+  await armWriteFailure(page, [specBefore.id]);
+  await press(page.getByRole("button", { name: "Review", exact: true }), testInfo.project.name);
+  await press(page.getByRole("button", { name: /Approve all/ }), testInfo.project.name);
+  await checkSaveClaim(page, {
+    case: "forced-failure",
+    toast: page.getByTestId("plan-toast"),
+    includes: ["Spec review still in plan"],
+    blocks: [{ id: specBefore.id, starts_at: specBefore.starts_at }],
+  });
+  const newerStart = "2026-11-11T18:00:00Z";
+  const newerEnd = "2026-11-11T19:30:00Z";
+  const changed = await page.evaluate(async (body) => {
+    const response = await fetch("/api/decisions/plan/commit", {
+      method: "POST",
+      credentials: "same-origin",
+      headers: { "Content-Type": "application/json", "X-TAFO-Actor": "human" },
+      body: JSON.stringify(body),
+    });
+    return { ok: response.ok, text: await response.text() };
+  }, {
+    confirmed: true,
+    moves: [{
+      block_id: specBefore.id,
+      expected_version: specBefore.version,
+      starts_at: newerStart,
+      ends_at: newerEnd,
+      idempotency_key: "r4-newer-spec",
+      title: "Spec review",
+    }],
+    approvals: [],
+  });
+  expect(changed.ok, changed.text).toBeTruthy();
+  await page.reload();
+  await expect(page.getByTestId("plan-conflict")).toContainText("Spec review");
+  const posts: string[] = [];
+  page.on("request", (request) => {
+    if (request.method() === "POST" && request.url().includes("/api/decisions/plan/commit")) posts.push(request.postData() || "");
+  });
+  await press(page.getByRole("button", { name: "Review", exact: true }), testInfo.project.name);
+  await press(page.getByRole("button", { name: /Approve all/ }), testInfo.project.name);
+  await checkSaveClaim(page, {
+    case: "matches-server",
+    toast: page.getByTestId("plan-toast"),
+    includes: ["Spec review changed, so nothing was saved"],
+    excludes: ["Approved"],
+    blocks: [{ id: specBefore.id, starts_at: newerStart, ends_at: newerEnd }],
+  });
+  expect(posts.some((body) => body.includes(specBefore.id))).toBe(false);
+});
+
+test("R5 unsynced moved proposal does not block healthy moves", async ({ page }, testInfo) => {
+  const before = await calendarState(page);
+  const vendor = before.blocks.find((item) => item.title === "Call vendor");
+  if (!vendor) throw new Error("vendor missing");
+  await press(page.getByRole("button", { name: "Plan mode" }), testInfo.project.name);
+  const budget = block(page, "Budget sheet");
+  await budget.scrollIntoViewIfNeeded();
+  const at = await center(budget);
+  await uiDrag(page, testInfo.project.name, at.x, at.y, at.x, at.y + 60);
+  await armWriteFailure(page, [], 1);
+  await press(page.getByRole("button", { name: "Review", exact: true }), testInfo.project.name);
+  await press(page.getByRole("button", { name: /Approve all/ }), testInfo.project.name);
+  const failed = page.getByTestId("plan-toast");
+  await checkSaveClaim(page, {
+    case: "failure-then-retry",
+    toast: failed,
+    includes: ["Budget sheet", "still in plan"],
+    excludes: ["not pending"],
+    retry: async () => {
+      const call = block(page, "Call vendor");
+      await call.scrollIntoViewIfNeeded();
+      const from = await center(call);
+      await dragHold(page, from.x, from.y, from.x, from.y + 60);
+      await press(page.getByRole("button", { name: "Review", exact: true }), testInfo.project.name);
+      await press(page.getByRole("button", { name: /Approve all/ }), testInfo.project.name);
+    },
+    afterRetry: {
+      toast: page.getByTestId("plan-toast"),
+      excludes: ["not pending", "Nothing was saved"],
+      blocks: [{ id: vendor.id, starts_at: "2026-11-10T16:00:00Z", ends_at: "2026-11-10T16:30:00Z" }],
+    },
+  });
 });
 
 test("V3 a failed confirmation read still drops saved moves", async ({ page }, testInfo) => {
@@ -929,7 +1084,7 @@ test("V3 a failed confirmation read still drops saved moves", async ({ page }, t
   await press(page.getByRole("button", { name: "Review", exact: true }), testInfo.project.name);
   await press(page.getByRole("button", { name: /Approve all/ }), testInfo.project.name);
   const toast = page.getByTestId("plan-toast");
-  await expect(toast).toHaveText("Saved. The calendar will refresh shortly.");
+  await expect(toast).toHaveText("Saved · refreshing the calendar");
   await expect(toast).not.toContainText("unsaved");
   await expect(toast).not.toContainText("Nothing was changed");
   expect(await page.evaluate(() => localStorage.getItem("tafo.v3.plan.v2"))).toBeNull();
@@ -949,7 +1104,8 @@ test("V3 a failed confirmation read still drops saved moves", async ({ page }, t
   expect(after.proposals.filter((item) => item.kind === "calendar_block" && item.status === "pending")).toHaveLength(0);
 });
 
-test("V3 double tap approve all applies once", async ({ page }, testInfo) => {
+test("V3 touch double-tap on Approve all commits once", async ({ page }, testInfo) => {
+  test.skip(testInfo.project.name === "desktop", "desktop has no touch screen");
   let commits = 0;
   page.on("request", (request) => {
     if (request.method() === "POST" && request.url().includes("/api/decisions/plan/commit")) commits += 1;
@@ -959,11 +1115,19 @@ test("V3 double tap approve all applies once", async ({ page }, testInfo) => {
   await dragHold(page, vendor.x, vendor.y, vendor.x, vendor.y + 60);
   const staged = JSON.parse(await page.evaluate(() => localStorage.getItem("tafo.v3.plan.v2") || "null"));
   await press(page.getByRole("button", { name: "Review", exact: true }), testInfo.project.name);
-  await page.getByRole("button", { name: /Approve all/ }).evaluate((node) => {
-    node.dispatchEvent(new MouseEvent("click", { bubbles: true }));
-    node.dispatchEvent(new MouseEvent("click", { bubbles: true }));
-  });
+  const sheet = page.getByTestId("review-sheet");
+  await expect(sheet).toBeVisible();
+  const approve = page.getByTestId("approve-all");
+  await approve.scrollIntoViewIfNeeded();
+  const box = await approve.boundingBox();
+  if (!box) throw new Error("approve missing");
+  const x = box.x + box.width / 2;
+  const y = box.y + box.height / 2;
+  await page.touchscreen.tap(x, y);
+  await page.waitForTimeout(56);
+  await page.touchscreen.tap(x, y);
   const toast = page.getByTestId("plan-toast");
+  await expect(toast).toBeVisible({ timeout: 2000 });
   await expect(toast).toContainText(/Approved|Saved/);
   await expect(toast).not.toContainText("changed");
   expect(commits).toBe(1);
@@ -1021,7 +1185,7 @@ test("R2 a stale draft does not overwrite a newer block", async ({ page }, testI
   const draft = JSON.parse(await page.evaluate(() => localStorage.getItem("tafo.v3.plan.v2") || "null"));
   expect(draft.moves.map((item: { id: string }) => item.id)).toEqual([specBefore.id]);
   expect(draft.moves[0].version).toBe(staged.moves[0].version);
-  await expect(page.getByTestId("plan-conflict")).toContainText("Spec review changed");
+  await expect(page.getByTestId("plan-conflict")).toContainText("Changed · Spec review");
 });
 
 test.describe("motion", () => {

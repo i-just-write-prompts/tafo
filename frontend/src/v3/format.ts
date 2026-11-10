@@ -146,16 +146,15 @@ function joinedNames(names: string[]): string {
   return `${names.slice(0, -1).join(", ")}, and ${names[names.length - 1]}`;
 }
 
-/** Names the moves that stayed in the draft. Never claims that nothing changed. */
+/** Names the moves that stayed in the draft. The event name may ellipsize; "still in plan" must not. */
 export function partialPlanToast(saved: number, requested: number, unsaved: string[]): string {
   const names = joinedNames(unsaved);
-  const single = unsaved.length <= 1;
-  const tail = `${names} ${single ? "isn't" : "aren't"} synced and ${single ? "is" : "are"} still in your plan.`;
+  const tail = `${names} still in plan`;
   if (saved <= 0) return tail;
-  return `Saved ${saved} of ${requested}. ${tail}`;
+  return `Saved ${saved} of ${requested} · ${tail}`;
 }
 
-export const SAVED_REFRESH = "Saved. The calendar will refresh shortly.";
+export const SAVED_REFRESH = "Saved · refreshing the calendar";
 
 export function denyToast(title: string): string {
   return `Denied · ${title} → Unscheduled`;
