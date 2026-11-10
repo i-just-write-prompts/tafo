@@ -84,6 +84,16 @@ export function refusedMoveToast(title: string): string {
   return `${title} didn't move.`;
 }
 
+/** An approved proposal whose calendar create did not land. No arrow. */
+export function unplacedToast(title: string): string {
+  return `${title} · not on calendar`;
+}
+
+/** Narrow plan banner. The name stays on the Review sheet's Changed tag. */
+export function compactConflict(count: number): string {
+  return `${count} changed`;
+}
+
 export function dayName(dayKey: string): string {
   return DAYS[PlanTime.weekdayIndex(dayKey)];
 }
@@ -144,9 +154,13 @@ export function approvedToast(moves: number, proposals: number, held: string[] =
   const parts: string[] = [];
   if (moves > 0) parts.push(plural(moves, "move"));
   if (proposals > 0) parts.push(plural(proposals, "proposal"));
+  if (held.length > 0) {
+    const count = moves + proposals;
+    const saved = count > 0 ? `Approved ${count}` : "Approved";
+    return `${saved} · ${joinedNames(held)} changed`;
+  }
   const saved = parts.length === 0 ? "Approved" : `Approved ${parts.join(" + ")}`;
-  if (held.length === 0) return saved;
-  return `${saved} · ${joinedNames(held)} changed`;
+  return saved;
 }
 
 function joinedNames(names: string[]): string {
@@ -172,9 +186,7 @@ export const REVERT_TOAST = "Reverted. Nothing changed.";
 
 export function revertToast(unsynced: string[]): string {
   if (unsynced.length === 0) return REVERT_TOAST;
-  const names = joinedNames(unsynced);
-  const verb = unsynced.length === 1 ? "is" : "are";
-  return `Reverted. ${names} stayed approved and ${verb} not on the calendar.`;
+  return `Reverted · ${joinedNames(unsynced)} not on calendar`;
 }
 export const SYNC_DEMO = "Demo · not synced";
 export const TIP_TEXT = "Moving several? Try Plan";
