@@ -83,4 +83,47 @@ describe("calendar events", () => {
     expect(showSummary(ALL_SHOWN)).toBe("All calendars · proposals on");
     expect(showSummary({ ...ALL_SHOWN, work: false, proposals: false })).toBe("Home, Personal · proposals off");
   });
+
+  it("draws an approved proposal with a failed write and no block as Not on calendar", () => {
+    const tasks = [task({ id: "task-budget", title: "Budget sheet", domain: "work" })];
+    const proposals: Proposal[] = [
+      {
+        id: "prp-budget",
+        source: "sample-agent",
+        source_kind: "agent",
+        kind: "calendar_block",
+        status: "approved",
+        explanation: "due Fri",
+        payload: {
+          task_id: "task-budget",
+          domain: "work",
+          starts_at: "2026-11-10T19:00:00Z",
+          ends_at: "2026-11-10T20:30:00Z",
+        },
+        edited_payload: null,
+        availability: null,
+        version: 2,
+      },
+    ];
+    const events = buildEvents(tasks, [], proposals, zone, [
+      { id: "obx-budget", proposal_id: "prp-budget", status: "failed", operation: "create", event_key: "evt-budget" },
+    ]);
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({
+      id: "prp-budget",
+      title: "Budget sheet",
+      state: "unplaced",
+      outboxId: "obx-budget",
+      start: "2026-11-10T19:00:00Z",
+    });
+    expect(visibleEvents(events, { ...ALL_SHOWN, proposals: false }, "").map((event) => event.id)).toEqual(["prp-budget"]);
+    const landed = buildEvents(
+      tasks,
+      [block({ id: "evt-budget", task_id: "task-budget", title: "Budget sheet", starts_at: "2026-11-10T19:00:00Z", ends_at: "2026-11-10T20:30:00Z" })],
+      proposals,
+      zone,
+      [{ id: "obx-budget", proposal_id: "prp-budget", status: "simulated", operation: "create", event_key: "evt-budget" }],
+    );
+    expect(landed.map((event) => event.state)).toEqual(["approved"]);
+  });
 });
