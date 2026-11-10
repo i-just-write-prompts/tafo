@@ -3,6 +3,7 @@
  * Run from the repo root after `npm run build` in frontend/.
  */
 import { spawn } from "node:child_process";
+import crypto from "node:crypto";
 import fs from "node:fs";
 import { createRequire } from "node:module";
 import os from "node:os";
@@ -70,7 +71,8 @@ async function drag(page, fromX, fromY, toX, toY, { release = true, picture = nu
   await page.waitForTimeout(420);
   await page.mouse.move(toX, toY, { steps: 18 });
   if (picture) {
-    await page.waitForTimeout(120);
+    await page.locator(".block.lifted").waitFor({ timeout: 2_000 });
+    await page.waitForTimeout(80);
     await shot(page, picture);
   }
   if (release) await page.mouse.up();
@@ -261,13 +263,18 @@ try {
   await open(phone, false);
   await shot(phone, "01-day");
   await phone.getByTestId("more-button").tap();
+  await phone.getByRole("menu", { name: "More" }).waitFor();
+  await phone.waitForTimeout(280);
   await shot(phone, "01b-more-menu");
   await phone.keyboard.press("Escape");
+  await phone.getByRole("menu", { name: "More" }).waitFor({ state: "hidden" });
+  await phone.waitForTimeout(200);
   const narrowVendor = await center(phone.getByRole("button", { name: /Call vendor,/ }));
   await drag(phone, narrowVendor.x, narrowVendor.y, narrowVendor.x, narrowVendor.y + 45, { release: false, picture: "02-quick-drag" });
   await phone.mouse.move(narrowVendor.x, narrowVendor.y + 60, { steps: 8 });
   await phone.mouse.up();
-  await phone.waitForTimeout(400);
+  await phone.getByTestId("plan-toast").waitFor();
+  await phone.waitForTimeout(250);
   await shot(phone, "02b-quick-saved");
   if (await phone.getByRole("button", { name: "Dismiss tip" }).count()) {
     await phone.getByRole("button", { name: "Dismiss tip" }).tap();
@@ -286,6 +293,10 @@ try {
   const narrowSpec = await center(phone.getByRole("button", { name: /Spec review/ }));
   await drag(phone, narrowSpec.x, narrowSpec.y, await columnX(phone, 2), narrowSpec.y, { release: false, picture: "06-plan-rearrange" });
   await phone.mouse.up();
+  const early = ["01-day", "01b-more-menu", "02-quick-drag", "02b-quick-saved"].map((name) =>
+    crypto.createHash("md5").update(fs.readFileSync(path.join(s23, `${name}.png`))).digest("hex"),
+  );
+  if (new Set(early).size !== early.length) throw new Error(`s23 frames collided: ${early.join(" ")}`);
   await narrow.close();
   await chrome.close();
   console.log("captured", frames, s23);

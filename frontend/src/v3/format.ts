@@ -135,7 +135,9 @@ export function approvedToast(moves: number, proposals: number): string {
   return `Approved ${plural(moves, "move")} + ${plural(proposals, "proposal")}`;
 }
 
-export const DENY_TOAST = "Denied. Alternates aren't built yet.";
+export function denyToast(title: string): string {
+  return `Denied · ${title} moved to Unscheduled`;
+}
 export const REVERT_TOAST = "Reverted. Nothing changed.";
 export const SYNC_DEMO = "Demo · not synced";
 export const TIP_TEXT = "Moving several? Try Plan";

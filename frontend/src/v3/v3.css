@@ -64,6 +64,8 @@ body { margin: 0; background: #0a0b0d; }
   font-family: Inter, system-ui, sans-serif;
   position: relative;
   overflow: hidden;
+  overflow: clip;
+  overscroll-behavior: none;
   user-select: none;
   box-sizing: border-box;
 }
@@ -81,9 +83,15 @@ body { margin: 0; background: #0a0b0d; }
 }
 .v3 input { user-select: text; }
 .v3 :focus-visible {
-  outline: 2px solid var(--amber);
-  outline-offset: -2px;
+  outline: 2px solid var(--t1);
+  outline-offset: 2px;
 }
+.block:focus-visible {
+  outline: 1.5px solid var(--t1);
+  outline-offset: 2px;
+  border-radius: 9px;
+}
+.v3[data-mode="week"] .block:focus-visible { border-radius: 7px; }
 :where(.v3) h1,
 :where(.v3) h2,
 :where(.v3) p { margin: 0; }
@@ -115,6 +123,7 @@ body { margin: 0; background: #0a0b0d; }
   height: 56px;
   padding: 0 12px 0 16px;
   flex: none;
+  position: relative;
 }
 .v3[data-layout="frame"] .v3-header {
   position: absolute;
@@ -217,6 +226,15 @@ body { margin: 0; background: #0a0b0d; }
   font-weight: 600;
   display: inline-flex;
   align-items: center;
+  flex: none;
+  white-space: nowrap;
+}
+.v3-banner .tag {
+  position: absolute;
+  top: 6px;
+  right: 12px;
+  height: 22px;
+  padding: 0 8px;
 }
 
 .v3-dow {
@@ -342,6 +360,9 @@ body { margin: 0; background: #0a0b0d; }
   text-align: left;
   transition: left 0.35s var(--ease), top 0.35s var(--ease), width 0.35s var(--ease), height 0.35s var(--ease);
 }
+.face.settle-lock,
+.face.settling { transition: none; transform-origin: top left; }
+.face.settling.live { transition: transform 350ms var(--ease); }
 .v3[data-mode="week"] .face { border-radius: 5px; }
 .block.lifted { z-index: 5; }
 .block.lifted .face {
@@ -361,10 +382,20 @@ body { margin: 0; background: #0a0b0d; }
 .face.one .body strong,
 .face.one .body span { white-space: nowrap; }
 .face.one .body strong { font-size: 14px; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.v3[data-mode="week"] .face .body {
+  overflow: hidden;
+  min-width: 0;
+}
 .v3[data-mode="week"] .face .body strong {
   font-size: 11px;
   line-height: 13px;
   font-weight: 600;
+}
+.v3[data-narrow="1"][data-mode="week"] .face .body strong,
+.v3[data-narrow="1"][data-mode="week"] .week-title {
+  font-size: 10.5px;
+  line-height: 12px;
+  letter-spacing: -0.35px;
 }
 .face.proposed { background: color-mix(in srgb, currentColor 12%, transparent); }
 .face.proposed .body span { color: inherit; }
@@ -408,14 +439,15 @@ body { margin: 0; background: #0a0b0d; }
 .v3[data-mode="week"] .corner .sparkle { width: 10px; height: 10px; }
 .v3[data-mode="week"] .corner .halo { width: 12px; height: 12px; }
 .week-title {
+  display: block;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   font-size: 11px;
   font-weight: 600;
   line-height: 13px;
   letter-spacing: -0.02em;
-}
-.week-title.fade {
-  -webkit-mask-image: linear-gradient(90deg, #000 70%, transparent);
-  mask-image: linear-gradient(90deg, #000 70%, transparent);
 }
 .ghost {
   position: absolute;
@@ -493,7 +525,7 @@ body { margin: 0; background: #0a0b0d; }
 
 .modal { position: absolute; inset: 0; z-index: 20; isolation: isolate; }
 .scrim { position: absolute; inset: 0; background: rgba(0, 0, 0, 0.55); z-index: 0; animation: v3-fade 250ms var(--ease); }
-.modal .sheet { animation: v3-sheet 250ms var(--ease); }
+.modal .sheet { animation: v3-sheet 250ms var(--ease) both; }
 .modal .menu,
 .modal .view-menu { animation: v3-fade 200ms var(--ease); }
 .modal.closing .scrim { animation: v3-fade-out 150ms var(--ease) forwards; }
@@ -611,8 +643,17 @@ body { margin: 0; background: #0a0b0d; }
   max-width: calc(100% - 24px);
 }
 .v3[data-layout="frame"] .toast { top: 700px; }
-.v3[data-layout="flow"] .toast { bottom: 108px; }
-.toast p { font-size: 15px; padding: 0 12px 0 6px; white-space: nowrap; }
+.v3[data-layout="flow"] .toast { bottom: 96px; }
+.v3[data-layout="flow"][data-toast="1"] .v3-grid { margin-bottom: 52px; }
+.v3[data-sheet="1"] .toast { visibility: hidden; }
+.toast p {
+  font-size: 15px;
+  padding: 0 12px 0 6px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+}
 .toast button { min-width: 64px; height: 44px; padding: 0 14px; font-weight: 600; border-left: 1px solid #3a3e45; }
 .toast-icon {
   width: 18px;

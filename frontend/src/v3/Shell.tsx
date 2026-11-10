@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { api, reportFailure } from "../api";
 import { PlanActions } from "../plan/actions";
 import { PlanMachine } from "../plan/planMachine";
@@ -26,7 +26,6 @@ import {
   type TapBox,
 } from "./geometry";
 import {
-  DENY_TOAST,
   PLAN_HINT,
   REVERT_TOAST,
   SYNC_DEMO,
@@ -37,6 +36,7 @@ import {
   clock,
   dayName,
   dayTitle,
+  denyToast,
   domainLabel,
   exactClock,
   gutterClock,
@@ -83,6 +83,15 @@ interface Preview {
   dayKey: string;
   dayIndex: number;
   startHour: number;
+}
+
+interface Settle {
+  id: string;
+  dx: number;
+  dy: number;
+  sx: number;
+  sy: number;
+  live: boolean;
 }
 
 interface Props {
@@ -162,8 +171,10 @@ export function CalendarShell(props: Props) {
   const [busy, setBusy] = useState(false);
   const gridRef = useRef<HTMLDivElement>(null);
   const originRef = useRef<DragOrigin | null>(null);
-  const releaseRef = useRef<Gesture | null>(null);
   const gestureRef = useRef<Gesture>({ phase: "idle" });
+  const settleFrom = useRef<{ id: string; left: number; top: number; width: number; height: number } | null>(null);
+  const [settle, setSettle] = useState<Settle | null>(null);
+  const [lockId, setLockId] = useState<string | null>(null);
   const suppressClick = useRef(false);
   const toastToken = useRef(0);
   const propsRef = useRef(props);
@@ -241,13 +252,6 @@ export function CalendarShell(props: Props) {
   }, [gesture.phase, gesture.phase === "pending" ? gesture.started : 0]);
 
   useEffect(() => {
-    const released = releaseRef.current;
-    if (!released || gesture.phase !== "idle") return;
-    releaseRef.current = null;
-    if (gestureUp(released).commit) finishGesture(released);
-  }, [gesture]);
-
-  useEffect(() => {
     function onKey(event: KeyboardEvent) {
       if (event.key === "Escape") {
         setOverlay(null);
@@ -261,25 +265,84 @@ export function CalendarShell(props: Props) {
   useEffect(() => {
     if (!overlay) return undefined;
     const previous = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    const shell = document.querySelector(".v3");
+    if (shell instanceof HTMLElement) shell.scrollTop = 0;
     const root = document.querySelector(".sheet, .menu, .view-menu");
-    root?.querySelector<HTMLElement>("button, input")?.focus();
+    root?.querySelector<HTMLElement>("button, input")?.focus({ preventScroll: true });
     return () => {
-      if (previous && document.contains(previous)) previous.focus();
+      if (previous && document.contains(previous)) previous.focus({ preventScroll: true });
     };
   }, [overlay]);
 
   useEffect(() => {
     if (!toast) return undefined;
+    const delay = Math.max(0, toast.until - Date.now());
     const timer = window.setTimeout(() => {
-      setToast((current) => (current && undoExpiredNow(current) ? null : current));
+      setToast(null);
       setUndo(null);
-    }, Math.max(0, toast.until - Date.now()));
+    }, delay);
     return () => window.clearTimeout(timer);
   }, [toast]);
 
-  function undoExpiredNow(current: UndoToast<null>): boolean {
-    return Date.now() >= current.until;
-  }
+  useLayoutEffect(() => {
+    const from = settleFrom.current;
+    if (!from) return;
+    settleFrom.current = null;
+    if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
+      setLockId(null);
+      return;
+    }
+    const face = gridRef.current?.querySelector(`[data-testid="block-${from.id}"] .face`);
+    if (!(face instanceof HTMLElement)) {
+      setLockId(null);
+      return;
+    }
+    const next = face.getBoundingClientRect();
+    const sx = next.width > 1 ? from.width / next.width : 1;
+    const sy = next.height > 1 ? from.height / next.height : 1;
+    const dx = from.left - next.left;
+    const dy = from.top - next.top;
+    if (Math.hypot(dx, dy) < 0.5 && Math.abs(sx - 1) < 0.02 && Math.abs(sy - 1) < 0.02) {
+      setLockId(null);
+      return;
+    }
+    setSettle({ id: from.id, dx, dy, sx, sy, live: false });
+  });
+
+  useLayoutEffect(() => {
+    if (!settle || settle.live) return undefined;
+    const frameId = requestAnimationFrame(() => {
+      setSettle((current) => (current && !current.live ? { ...current, live: true } : current));
+    });
+    return () => cancelAnimationFrame(frameId);
+  }, [settle]);
+
+  useEffect(() => {
+    if (!settle?.live) return undefined;
+    const timer = window.setTimeout(() => {
+      setSettle(null);
+      setLockId(null);
+    }, 380);
+    return () => window.clearTimeout(timer);
+  }, [settle]);
+
+  useLayoutEffect(() => {
+    if (!toast || document.documentElement.dataset.frame === "1") return;
+    const kind = overlayRef.current?.kind;
+    if (kind && kind !== "menu" && kind !== "view") return;
+    const grid = gridRef.current;
+    const node = document.querySelector(".v3 .toast");
+    if (!grid || !(node instanceof HTMLElement)) return;
+    const toastRect = node.getBoundingClientRect();
+    let overlap = 0;
+    grid.querySelectorAll(".block, .slim").forEach((block) => {
+      const rect = block.getBoundingClientRect();
+      if (rect.bottom > toastRect.top + 1 && rect.top < toastRect.bottom) {
+        overlap = Math.max(overlap, rect.bottom - toastRect.top);
+      }
+    });
+    if (overlap > 1) grid.scrollTop += overlap + 6;
+  }, [toast, overlay]);
 
   function say(message: string) {
     setLive("");
@@ -462,8 +525,16 @@ export function CalendarShell(props: Props) {
       window.removeEventListener("pointercancel", up);
       const released = gestureMove(gestureRef.current, { x: native.clientX, y: native.clientY }, performance.now());
       const result = gestureUp(released);
-      if (result.commit) suppressClick.current = true;
-      releaseRef.current = result.commit ? released : null;
+      if (result.commit && released.phase === "lifted") {
+        suppressClick.current = true;
+        const face = gridRef.current?.querySelector(`[data-testid="block-${released.eventId}"] .face`);
+        if (face instanceof HTMLElement) {
+          const rect = face.getBoundingClientRect();
+          settleFrom.current = { id: released.eventId, left: rect.left, top: rect.top, width: rect.width, height: rect.height };
+        }
+        setLockId(released.eventId);
+        finishGesture(released);
+      }
       gestureRef.current = { phase: "idle" };
       setGesture({ phase: "idle" });
     }
@@ -563,7 +634,7 @@ export function CalendarShell(props: Props) {
     try {
       if (action === "deny") {
         await PlanActions.reject(proposal, "Denied");
-        pushToast(DENY_TOAST);
+        pushToast(denyToast(event.title));
       } else {
         await PlanActions.approve(proposal);
         pushToast(`Approved ${event.title}.`);
@@ -596,11 +667,20 @@ export function CalendarShell(props: Props) {
   const crossing = dragPreview ? crossingFor(dragPreview, serverEvents) : false;
   const liveParts = dragPreview ? readoutParts(dragPreview, serverEvents) : null;
   const layout = frame ? "frame" : "flow";
+  const sheetOpen = overlay != null && overlay.kind !== "menu" && overlay.kind !== "view";
   const syncText = props.meta?.calendar_mode === "demo" ? SYNC_DEMO : props.meta?.sync_label || SYNC_DEMO;
   const framedClock = document.documentElement.dataset.frame === "1";
 
   return (
-    <div className="v3" data-layout={layout} data-mode={mode} data-plan={plan.active ? "on" : "off"}>
+    <div
+      className="v3"
+      data-layout={layout}
+      data-mode={mode}
+      data-plan={plan.active ? "on" : "off"}
+      data-sheet={sheetOpen ? "1" : "0"}
+      data-toast={toast && !sheetOpen ? "1" : "0"}
+      data-narrow={weekColumnWidth(Math.max(width, 320)) < 52 ? "1" : "0"}
+    >
       <StatusBar framed={framedClock} time={now} timeZone={timeZone} />
       {plan.active ? (
         <PlanBanner
@@ -694,6 +774,8 @@ export function CalendarShell(props: Props) {
               nowHour={anchor === todayKey ? nowHour : null}
               drag={dragPreview}
               glow={glow}
+              settle={settle}
+              lockId={lockId}
               openId={overlay?.kind === "event" ? overlay.id : null}
               onPointerDown={onPointerDown}
               onKeyDown={onBlockKey}
@@ -708,6 +790,8 @@ export function CalendarShell(props: Props) {
               todayIndex={weekKeys.indexOf(todayKey)}
               drag={dragPreview}
               glow={glow}
+              settle={settle}
+              lockId={lockId}
               openId={overlay?.kind === "event" ? overlay.id : null}
               onPointerDown={onPointerDown}
               onKeyDown={onBlockKey}
@@ -919,12 +1003,25 @@ function PlanBanner(props: {
   );
 }
 
+function settleMotion(settle: Settle | null, id: string): { className: string; style: React.CSSProperties } {
+  if (!settle || settle.id !== id) return { className: "", style: {} };
+  return {
+    className: settle.live ? "settling live" : "settling",
+    style: {
+      transformOrigin: "top left",
+      transform: settle.live ? "translate(0px, 0px) scale(1, 1)" : `translate(${settle.dx}px, ${settle.dy}px) scale(${settle.sx}, ${settle.sy})`,
+    },
+  };
+}
+
 function DayCanvas(props: {
   events: CalEvent[];
   width: number;
   nowHour: number | null;
   drag: Preview | null;
   glow: string[];
+  settle: Settle | null;
+  lockId: string | null;
   openId: string | null;
   onPointerDown: (event: CalEvent, pointer: React.PointerEvent<HTMLButtonElement>) => void;
   onKeyDown: (event: CalEvent, key: React.KeyboardEvent) => void;
@@ -969,6 +1066,8 @@ function DayCanvas(props: {
             lifted={lifted}
             open={props.openId === event.id}
             glow={props.glow.includes(event.id)}
+            settle={props.settle}
+            lockId={props.lockId}
             onPointerDown={props.onPointerDown}
             onKeyDown={props.onKeyDown}
             onOpen={props.onOpen}
@@ -1023,6 +1122,8 @@ function EventButton(props: {
   lifted: boolean;
   open: boolean;
   glow: boolean;
+  settle: Settle | null;
+  lockId: string | null;
   onPointerDown: (event: CalEvent, pointer: React.PointerEvent<HTMLButtonElement>) => void;
   onKeyDown: (event: CalEvent, key: React.KeyboardEvent) => void;
   onOpen: (event: CalEvent) => void;
@@ -1030,6 +1131,8 @@ function EventButton(props: {
   const { event, box, tap } = props;
   const one = box.h < 40;
   const time = box.w > 200 ? rangeLabel(event.startHour, event.endHour) : shortRange(event.startHour, event.endHour);
+  const motion = settleMotion(props.settle, event.id);
+  const locked = props.lockId === event.id ? "settle-lock" : "";
   return (
     <button
       type="button"
@@ -1043,7 +1146,7 @@ function EventButton(props: {
       onContextMenu={(menu) => menu.preventDefault()}
     >
       <span
-        className={`face ${event.state} ${one ? "one" : ""} ${props.glow ? "glow" : ""} ${props.open ? "open" : ""} ${event.domain}`}
+        className={`face ${event.state} ${one ? "one" : ""} ${props.glow ? "glow" : ""} ${props.open ? "open" : ""} ${event.domain} ${locked} ${motion.className}`}
         style={{
           left: box.x - tap.x,
           top: box.y - tap.y,
@@ -1051,6 +1154,7 @@ function EventButton(props: {
           height: box.h,
           background: event.state === "approved" ? fill(event.domain) : undefined,
           color: event.state === "proposed" ? line(event.domain) : event.state === "done" ? undefined : text(event.domain),
+          ...motion.style,
         }}
       >
         {event.state === "approved" ? <i className="bar" style={{ background: line(event.domain) }} /> : null}
@@ -1080,6 +1184,8 @@ function WeekCanvas(props: {
   todayIndex: number;
   drag: Preview | null;
   glow: string[];
+  settle: Settle | null;
+  lockId: string | null;
   openId: string | null;
   onPointerDown: (event: CalEvent, pointer: React.PointerEvent<HTMLButtonElement>) => void;
   onKeyDown: (event: CalEvent, key: React.KeyboardEvent) => void;
@@ -1094,9 +1200,10 @@ function WeekCanvas(props: {
   }));
   const boxes = weekBoxes(timed, props.width);
   const markY = props.drag ? weekY(props.drag.startHour) : null;
+  const titlePx = props.width > 0 && weekColumnWidth(props.width) < 52 ? 10.5 : 11;
   const measure = (value: string) => {
-    const canvas = measureCanvas();
-    return canvas ? canvas.measureText(value).width : value.length * 6.1;
+    const canvas = measureCanvas(titlePx);
+    return canvas ? canvas.measureText(value).width : value.length * (titlePx * 0.55);
   };
   return (
     <>
@@ -1134,6 +1241,8 @@ function WeekCanvas(props: {
           );
         }
         const lines = wrapWeekTitle(event.title, Math.max(8, box.w - 8), Math.max(1, Math.floor((box.h - 3) / 13)), measure);
+        const motion = settleMotion(props.settle, event.id);
+        const locked = props.lockId === event.id ? "settle-lock" : "";
         return (
           <button
             key={event.id}
@@ -1141,24 +1250,26 @@ function WeekCanvas(props: {
             className={lifted ? "block lifted" : props.openId === event.id ? "block open" : "block"}
             style={{ left: moved.x, top: moved.y, width: moved.w, height: moved.h }}
             aria-label={eventLabel(event)}
+            data-testid={`block-${event.id}`}
             onPointerDown={(pointer) => props.onPointerDown(event, pointer)}
             onKeyDown={(key) => props.onKeyDown(event, key)}
             onClick={() => props.onOpenDay(event.dayKey)}
             onContextMenu={(menu) => menu.preventDefault()}
           >
             <span
-              className={`face ${event.state} ${props.glow.includes(event.id) ? "glow" : ""} ${props.openId === event.id ? "open" : ""}`}
+              className={`face ${event.state} ${props.glow.includes(event.id) ? "glow" : ""} ${props.openId === event.id ? "open" : ""} ${locked} ${motion.className}`}
               style={{
                 inset: 0,
                 background: event.state === "approved" ? fill(event.domain) : undefined,
                 color: event.state === "proposed" ? line(event.domain) : text(event.domain),
+                ...motion.style,
               }}
             >
               {event.state === "approved" ? <i className="bar" style={{ background: line(event.domain) }} /> : null}
               {event.state === "proposed" ? <i className="dash" /> : null}
               <span className="body" style={{ inset: "2px 4px 2px 6px", justifyContent: "flex-start" }}>
                 {lines.lines.map((lineText) => (
-                  <strong key={lineText} className={lines.faded ? "week-title fade" : "week-title"}>{lineText}</strong>
+                  <strong key={lineText} className="week-title">{lineText}</strong>
                 ))}
               </span>
             </span>
@@ -1180,11 +1291,11 @@ function WeekCanvas(props: {
 }
 
 let canvasContext: CanvasRenderingContext2D | null | undefined;
-function measureCanvas(): CanvasRenderingContext2D | null {
-  if (canvasContext !== undefined) return canvasContext;
-  const canvas = document.createElement("canvas");
-  canvasContext = canvas.getContext("2d");
-  if (canvasContext) canvasContext.font = "600 11px Inter, system-ui, sans-serif";
+function measureCanvas(px: number): CanvasRenderingContext2D | null {
+  if (canvasContext === undefined) {
+    canvasContext = document.createElement("canvas").getContext("2d");
+  }
+  if (canvasContext) canvasContext.font = `600 ${px}px Inter, system-ui, sans-serif`;
   return canvasContext;
 }
 
