@@ -1,3 +1,0 @@
-# Fake AWS access key from gitleaks detect/detect_test.go (rule aws-access-token).
-# Not a real credential. This file is only here so secret-scan fails, then it is deleted.
-awsToken := "AKIALALEMEL33243OLIA"
