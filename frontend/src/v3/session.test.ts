@@ -138,9 +138,32 @@ describe("plan session", () => {
     expect(kept.savedMoveIds).toEqual(["spec", "budget"]);
     expect(kept.savedProposalIds).toEqual(["closet"]);
     expect(conflictingMoveIds(
-      [{ id: "spec", kind: "block", version: 1, from: { start: "2026-11-10T14:30:00Z", end: "2026-11-10T16:00:00Z" } }],
+      [{ id: "spec", kind: "block", version: 1, from: { start: "2026-11-10T14:30:00Z", end: "2026-11-10T16:00:00Z" }, to: { start: "2026-11-11T14:30:00Z", end: "2026-11-11T16:00:00Z" } }],
       [{ id: "spec", version: 2, starts_at: "2026-11-10T14:30:00Z", ends_at: "2026-11-10T16:00:00Z" }],
       [],
     )).toEqual(["spec"]);
+    const staged = { start: "2026-11-10T20:15:00Z", end: "2026-11-10T21:45:00Z" };
+    const proposalMove = {
+      id: "budget",
+      kind: "proposal" as const,
+      version: 1,
+      from: { start: "2026-11-10T19:00:00Z", end: "2026-11-10T20:30:00Z" },
+      to: staged,
+    };
+    expect(conflictingMoveIds(
+      [proposalMove],
+      [],
+      [{ id: "budget", version: 2, status: "approved", starts_at: staged.start, ends_at: staged.end }],
+    )).toEqual([]);
+    expect(conflictingMoveIds(
+      [proposalMove],
+      [],
+      [{ id: "budget", version: 2, status: "approved", starts_at: staged.start, ends_at: "2026-11-10T22:00:00Z" }],
+    )).toEqual(["budget"]);
+    expect(conflictingMoveIds(
+      [proposalMove],
+      [],
+      [{ id: "budget", version: 2, status: "rejected", starts_at: staged.start, ends_at: staged.end }],
+    )).toEqual(["budget"]);
   });
 });

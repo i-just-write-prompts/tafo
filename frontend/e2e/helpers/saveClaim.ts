@@ -19,7 +19,7 @@ export type ProposalRow = {
 
 export type TaskRow = { id: string; title: string };
 
-export type BlockClaim = { id?: string; title?: string; starts_at: string; ends_at?: string };
+export type BlockClaim = { id?: string; title?: string; taskTitle?: string; starts_at: string; ends_at?: string };
 export type ProposalClaim = { id: string; status: string };
 
 /** A save-claiming toast has to match a server read. Failure and retry are the same check. */
@@ -53,6 +53,11 @@ export function uiWhen(iso: string) {
   return `${part("weekday")}, ${part("month")} ${part("day")}`;
 }
 
+export async function renderedToast(toast: Locator): Promise<string> {
+  const text = await toast.locator("p").evaluate((el) => (el as HTMLElement).innerText);
+  return text.replace(/\s+/g, " ").trim();
+}
+
 async function assertClaim(page: Page, claim: Omit<SaveClaim, "case" | "retry" | "afterRetry">) {
   if (claim.toast) {
     for (const text of claim.includes ?? []) await expect(claim.toast).toContainText(text);
@@ -60,8 +65,16 @@ async function assertClaim(page: Page, claim: Omit<SaveClaim, "case" | "retry" |
   }
   const state = await readCalendar(page);
   for (const want of claim.blocks ?? []) {
-    const row = state.blocks.find((item) => (want.id ? item.id === want.id : item.title === want.title) && item.status === "scheduled");
-    expect(row, want.title || want.id).toBeTruthy();
+    const row = state.blocks.find((item) => {
+      if (item.status !== "scheduled") return false;
+      if (want.id) return item.id === want.id;
+      if (want.taskTitle) {
+        const task = state.tasks.find((entry) => entry.id === item.task_id);
+        return task?.title === want.taskTitle;
+      }
+      return item.title === want.title;
+    });
+    expect(row, want.taskTitle || want.title || want.id).toBeTruthy();
     expect(Date.parse(row?.starts_at || "")).toBe(Date.parse(want.starts_at));
     if (want.ends_at) expect(Date.parse(row?.ends_at || "")).toBe(Date.parse(want.ends_at));
   }
@@ -72,13 +85,25 @@ async function assertClaim(page: Page, claim: Omit<SaveClaim, "case" | "retry" |
   return state;
 }
 
-export async function checkSaveClaim(page: Page, claim: SaveClaim) {
+function claimedIds(claim: Omit<SaveClaim, "case" | "retry" | "afterRetry">): string[] {
+  return [
+    ...(claim.blocks ?? []).map((item) => item.id || ""),
+    ...(claim.proposals ?? []).map((item) => item.id),
+  ].filter(Boolean);
+}
+
+export async function checkSaveClaim(page: Page, claim: SaveClaim): Promise<string> {
   await assertClaim(page, claim);
   if (claim.case === "failure-then-retry") {
     if (!claim.retry || !claim.afterRetry) throw new Error("failure-then-retry needs retry and afterRetry");
+    const retried = new Set(claimedIds(claim.afterRetry));
+    for (const id of claimedIds(claim)) {
+      if (!retried.has(id)) throw new Error(`retry did not re-check ${id}`);
+    }
     await claim.retry();
     await assertClaim(page, claim.afterRetry);
   }
+  return claim.toast ? renderedToast(claim.toast) : "";
 }
 
 export async function armWriteFailure(page: Page, eventKeys: string[] = [], failCreates = 0) {

@@ -135,9 +135,13 @@ export function approveLabel(moves: number, proposals: number): string {
   return `Approve all · ${plural(moves, "move")} + ${plural(proposals, "proposal")}`;
 }
 
-export function approvedToast(moves: number, proposals: number): string {
-  if (proposals === 0) return `Approved ${plural(moves, "move")}`;
-  return `Approved ${plural(moves, "move")} + ${plural(proposals, "proposal")}`;
+export function approvedToast(moves: number, proposals: number, held: string[] = []): string {
+  const parts: string[] = [];
+  if (moves > 0) parts.push(plural(moves, "move"));
+  if (proposals > 0) parts.push(plural(proposals, "proposal"));
+  const saved = parts.length === 0 ? "Approved" : `Approved ${parts.join(" + ")}`;
+  if (held.length === 0) return saved;
+  return `${saved} · ${joinedNames(held)} changed`;
 }
 
 function joinedNames(names: string[]): string {
@@ -160,6 +164,13 @@ export function denyToast(title: string): string {
   return `Denied · ${title} → Unscheduled`;
 }
 export const REVERT_TOAST = "Reverted. Nothing changed.";
+
+export function revertToast(unsynced: string[]): string {
+  if (unsynced.length === 0) return REVERT_TOAST;
+  const names = joinedNames(unsynced);
+  const verb = unsynced.length === 1 ? "is" : "are";
+  return `Reverted. ${names} stayed approved and ${verb} not on the calendar.`;
+}
 export const SYNC_DEMO = "Demo · not synced";
 export const TIP_TEXT = "Moving several? Try Plan";
 export const PLAN_HINT = "Move several blocks, then approve or revert them together";

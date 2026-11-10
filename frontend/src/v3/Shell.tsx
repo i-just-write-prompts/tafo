@@ -29,7 +29,7 @@ import {
 } from "./geometry";
 import {
   PLAN_HINT,
-  REVERT_TOAST,
+  revertToast,
   SYNC_DEMO,
   TIP_TEXT,
   SAVED_REFRESH,
@@ -52,7 +52,7 @@ import {
 import { COMMIT_PX, gestureDown, gestureMove, gestureUp, HOLD_MS, holdReady, type Gesture } from "./gesture";
 import { CheckGlyph, Chevron, InfoGlyph, MoreGlyph, PlanGlyph, SearchGlyph, Sparkle } from "./icons";
 import { ALL_SHOWN, buildEvents, showSummary, visibleEvents, withMove, type CalEvent, type ShowFilters } from "./model";
-import { approveDisabled, conflictingMoveIds, enterPlan, exitPlan, includedIds, loadPlan, pendingProposalIds, proposalsOnDays, retainMoves, savePlan, stageMove, toggleSkip, type PlanSession, type StagedMove } from "./session";
+import { approveDisabled, conflictingMoveIds, enterPlan, exitPlan, includedIds, loadPlan, pendingProposalIds, proposalsOnDays, retainMoves, sameInstant, savePlan, stageMove, toggleSkip, type PlanSession, type StagedMove } from "./session";
 import { wrapWeekTitle } from "./titles";
 import { showUndo, type UndoToast } from "./undo";
 import "./v3.css";
@@ -787,30 +787,43 @@ export function CalendarShell(props: Props) {
     const blocked = new Set(conflictIds);
     const moves = [];
     const approvals = [];
+    const sent = new Set<string>();
     for (const move of plan.moves) {
       if (blocked.has(move.id)) continue;
       const event = serverEvents.find((item) => item.id === move.id);
-      if (!event) continue;
-      if (event.kind === "proposal") {
+      const proposal = props.proposals.find((item) => item.id === move.id);
+      const times = proposal ? proposalTimes(proposal) : null;
+      const retry = Boolean(
+        move.kind === "proposal"
+        && proposal?.status === "approved"
+        && times?.starts_at
+        && times.ends_at
+        && sameInstant(times.starts_at, move.to.start)
+        && sameInstant(times.ends_at, move.to.end),
+      );
+      if (event?.kind === "proposal" || retry) {
         approvals.push({
-          proposal_id: event.id,
+          proposal_id: move.id,
           expected_version: move.version,
           starts_at: move.to.start,
           ends_at: move.to.end,
         });
-      } else {
-        moves.push({
-          block_id: event.id,
-          expected_version: move.version,
-          starts_at: move.to.start,
-          ends_at: move.to.end,
-          idempotency_key: move.key,
-          title: move.title || event.title,
-          acknowledge_fixed_move: event.fixed,
-        });
+        sent.add(move.id);
+        continue;
       }
+      if (!event) continue;
+      moves.push({
+        block_id: event.id,
+        expected_version: move.version,
+        starts_at: move.to.start,
+        ends_at: move.to.end,
+        idempotency_key: move.key,
+        title: move.title || event.title,
+        acknowledge_fixed_move: event.fixed,
+      });
+      sent.add(move.id);
     }
-    const missing = plan.moves.filter((move) => !serverEvents.some((event) => event.id === move.id));
+    const missing = plan.moves.filter((move) => !blocked.has(move.id) && !sent.has(move.id));
     for (const id of included) {
       if (approvals.some((item) => item.proposal_id === id)) continue;
       const event = serverEvents.find((item) => item.id === id);
@@ -850,11 +863,13 @@ export function CalendarShell(props: Props) {
         ...missing.map((move) => move.title),
       ];
       const confirmed = await readCalendar();
-      const message = unsavedTitles.length > 0
+      const held = plan.moves.filter((move) => blocked.has(move.id)).map((move) => move.title);
+      const savedNote = unsavedTitles.length > 0
         ? partialPlanToast(savedMoves + savedProposals, savedMoves + savedProposals + unsavedTitles.length, unsavedTitles)
         : confirmed
-          ? approvedToast(savedMoves, savedProposals)
+          ? approvedToast(savedMoves, savedProposals, held)
           : SAVED_REFRESH;
+      const message = unsavedTitles.length > 0 && held.length > 0 ? `${savedNote} · ${held.join(", ")} changed` : savedNote;
       if (savedMoves + savedProposals > 0) {
         glowIds([...committed.moves, ...committed.approvals].filter((item) => item.saved).map((item) => item.item_id));
       }
@@ -898,11 +913,25 @@ export function CalendarShell(props: Props) {
   }
 
   function revertAll() {
+    const stranded = plan.moves.flatMap((move) => {
+      if (move.kind !== "proposal") return [];
+      const proposal = props.proposals.find((item) => item.id === move.id);
+      if (!proposal || proposal.status !== "approved") return [];
+      const times = proposalTimes(proposal);
+      const taskId = String((proposal.edited_payload || proposal.payload).task_id || "");
+      const landed = props.blocks.some((block) => (
+        block.status === "scheduled"
+        && (block.task_id || "") === taskId
+        && sameInstant(block.starts_at, move.to.start)
+        && sameInstant(block.ends_at, move.to.end)
+      ));
+      return landed || !times.starts_at ? [] : [move.title];
+    });
     const ids = plan.moves.map((move) => move.id);
     setPlan(exitPlan());
     setOverlay(null);
     glowIds(ids);
-    pushToast(REVERT_TOAST);
+    pushToast(revertToast(stranded));
   }
 
   const lifted = gesture.phase === "lifted";
@@ -933,6 +962,7 @@ export function CalendarShell(props: Props) {
           liveWhen={liveParts?.when ?? ""}
           crossing={lifted && crossing}
           conflict={conflictText ? `Changed · ${conflictText}` : ""}
+          compact={width < 380}
           onExit={() => { setPlan(exitPlan()); setOverlay(null); }}
           onRevert={() => setOverlay({ kind: "revert" })}
           onReview={() => setOverlay({ kind: "review" })}
@@ -1227,7 +1257,7 @@ function StatusBar({ framed, time, timeZone }: { framed: boolean; time: Date; ti
 }
 
 function toastKind(message: string): "info" | "plain" | "ok" {
-  if (message.includes("still in plan")) return "info";
+  if (message.includes("still in plan") || message.includes(" changed")) return "info";
   if (message.startsWith("Reverted") || message.startsWith("Denied")) return "plain";
   return "ok";
 }
@@ -1266,6 +1296,7 @@ function PlanBanner(props: {
   liveWhen: string;
   crossing: boolean;
   conflict: string;
+  compact: boolean;
   onExit: () => void;
   onRevert: () => void;
   onReview: () => void;
@@ -1280,8 +1311,10 @@ function PlanBanner(props: {
             <span className="banner-title">{props.liveTitle}</span>
             <span className="banner-when"> · {props.liveWhen}</span>
           </p>
+        ) : props.conflict && props.compact ? (
+          <p data-testid="plan-conflict">{props.conflict}</p>
         ) : <p>{props.text}</p>}
-        {props.conflict ? <p data-testid="plan-conflict">{props.conflict}</p> : null}
+        {props.conflict && !props.compact ? <p data-testid="plan-conflict">{props.conflict}</p> : null}
       </div>
       {props.live && props.crossing ? <span className="tag">Crosses work hours</span> : null}
       {!props.live && props.count === 0 ? <button type="button" className="ghost-btn" onClick={props.onExit}>Exit</button> : null}
@@ -1734,6 +1767,17 @@ function EventSheet(props: {
   );
 }
 
+function armApproveClickShield() {
+  const stop = (event: Event) => {
+    const target = event.target;
+    if (!(target instanceof Element) || !target.closest(".block")) return;
+    event.preventDefault();
+    event.stopImmediatePropagation();
+  };
+  document.addEventListener("click", stop, true);
+  window.setTimeout(() => document.removeEventListener("click", stop, true), 700);
+}
+
 function ReviewSheet(props: {
   moves: StagedMove[];
   events: CalEvent[];
@@ -1788,7 +1832,7 @@ function ReviewSheet(props: {
           </div>
         );
       })}
-      <button type="button" className="primary" data-testid="approve-all" disabled={props.disabled} onClick={props.onApprove}>{props.label}</button>
+      <button type="button" className="primary" data-testid="approve-all" disabled={props.disabled} onPointerDown={armApproveClickShield} onClick={props.onApprove}>{props.label}</button>
       <button type="button" className="quiet" onClick={props.onKeep}>Keep planning</button>
     </div>
   );

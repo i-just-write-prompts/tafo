@@ -17,7 +17,7 @@ def local(day: int, hour: int, minute: int = 0) -> str:
     return moment.astimezone(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
 
-def settings_for(tmp_path) -> Settings:
+def settings_for(tmp_path, e2e: bool = False) -> Settings:
     return Settings(
         host="127.0.0.1",
         port=8787,
@@ -30,11 +30,12 @@ def settings_for(tmp_path) -> Settings:
         work_invite_email="",
         allow_lan=False,
         seed_demo=False,
+        e2e=e2e,
     )
 
 
-def open_week(tmp_path):
-    settings = settings_for(tmp_path)
+def open_week(tmp_path, e2e: bool = False):
+    settings = settings_for(tmp_path, e2e=e2e)
     V3Week.load(settings.db_path)
     app = create_app(settings)
     client = TestClient(app)
@@ -511,8 +512,94 @@ def test_r5_unsynced_moved_proposal_does_not_block_healthy_moves(tmp_path):
         client.__exit__(None, None, None)
 
 
-def test_demo_fail_writes_endpoint_fails_one_update_and_live_omits_it(tmp_path):
+def test_r6_mismatched_or_denied_proposal_retries_are_409(tmp_path):
     client = open_week(tmp_path)
+    try:
+        budget = proposal_named(client, "Budget sheet")
+        spec = block_named(client, "Spec review")
+        closet = proposal_named(client, "Fix closet door")
+        original = spec["starts_at"]
+        moved = local(1, 15)
+        moved_end = local(1, 16, 30)
+        approved = client.post(
+            "/api/decisions/plan/commit",
+            json={
+                "confirmed": True,
+                "moves": [],
+                "approvals": [{
+                    "proposal_id": budget["id"],
+                    "expected_version": budget["version"],
+                    "starts_at": moved,
+                    "ends_at": moved_end,
+                }],
+            },
+        )
+        assert approved.status_code == 200, approved.text
+        mismatch = client.post(
+            "/api/decisions/plan/commit",
+            json={
+                "confirmed": True,
+                "moves": [{
+                    "block_id": spec["id"],
+                    "expected_version": spec["version"],
+                    "starts_at": local(2, 9, 30),
+                    "ends_at": local(2, 11),
+                    "idempotency_key": "v3-r6-mismatch-spec",
+                    "title": "Spec review",
+                }],
+                "approvals": [{
+                    "proposal_id": budget["id"],
+                    "expected_version": budget["version"],
+                    "starts_at": local(1, 16),
+                    "ends_at": local(1, 17, 30),
+                }],
+            },
+        )
+        assert mismatch.status_code == 409, mismatch.text
+        assert mismatch.json()["detail"]["code"] == "not_pending"
+        assert block_named(client, "Spec review")["starts_at"] == original
+        task_id = budget["payload"]["task_id"]
+        written = [
+            row for row in client.get("/api/calendar/blocks").json()["blocks"]
+            if row["task_id"] == task_id and row["status"] == "scheduled"
+        ]
+        assert any(row["starts_at"] == moved for row in written)
+        assert not any(row["starts_at"] == local(1, 16) for row in written)
+        rejected = client.post(
+            f"/api/decisions/{closet['id']}/reject",
+            json={"expected_version": closet["version"], "confirmed": True, "note": "No"},
+        )
+        assert rejected.status_code == 200, rejected.text
+        denied = client.post(
+            "/api/decisions/plan/commit",
+            json={
+                "confirmed": True,
+                "moves": [],
+                "approvals": [{
+                    "proposal_id": closet["id"],
+                    "expected_version": closet["version"],
+                    "starts_at": local(1, 18),
+                    "ends_at": local(1, 19),
+                }],
+            },
+        )
+        assert denied.status_code == 409, denied.text
+        assert denied.json()["detail"]["code"] == "not_pending"
+        assert proposal_named(client, "Fix closet door")["status"] == "rejected"
+    finally:
+        client.__exit__(None, None, None)
+
+
+def test_demo_fail_writes_endpoint_fails_one_update_and_live_omits_it(tmp_path):
+    quiet = open_week(tmp_path)
+    try:
+        missing = quiet.post("/api/e2e/fail-writes", json={"event_keys": ["blk_v3_spec"]})
+        assert missing.status_code == 404
+    finally:
+        quiet.__exit__(None, None, None)
+    armed = tmp_path / "armed"
+    armed.mkdir()
+    client = open_week(armed, e2e=True)
     try:
         spec = block_named(client, "Spec review")
         armed = client.post("/api/e2e/fail-writes", json={"event_keys": [spec["id"]], "fail_creates": 1})
