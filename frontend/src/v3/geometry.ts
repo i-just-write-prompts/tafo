@@ -224,44 +224,35 @@ export interface WeekEvent extends Timed {
 
 export function weekBoxes(events: WeekEvent[], width: number): WeekBox[] {
   const colW = weekColumnWidth(width);
-  const placed = events.map((event) => ({ ...event }));
-  const slim = new Set<string>();
-  const stripped = new Set<string>();
-  for (const event of placed) {
-    for (const other of placed) {
-      if (other.id === event.id || other.day !== event.day) continue;
-      const covers = event.start <= other.start && other.start < event.end;
-      const earlier = other.start > event.start || event.id < other.id;
-      if (covers && earlier && !slim.has(event.id)) {
-        slim.add(other.id);
-        stripped.add(event.id);
-      }
-    }
+  const byDay = new Map<number, WeekEvent[]>();
+  for (const event of events) {
+    const list = byDay.get(event.day) ?? [];
+    list.push(event);
+    byDay.set(event.day, list);
   }
-  return placed.map((event) => {
+  const lanes = new Map<string, { lane: number; lanes: number }>();
+  for (const list of byDay.values()) {
+    for (const [id, place] of assignLanes(list)) lanes.set(id, place);
+  }
+  return events.map((event) => {
+    const place = lanes.get(event.id) ?? { lane: 0, lanes: 1 };
     const colX = WEEK_GUTTER + event.day * colW;
-    const y = weekY(event.start) + 1;
-    const h = (event.end - event.start) * WEEK_PX - 2;
-    if (slim.has(event.id)) {
-      return {
-        id: event.id,
-        slim: true,
-        x: colX + colW - 1.5 - WEEK_STRIP,
-        y,
-        w: WEEK_STRIP,
-        h,
-      };
-    }
-    const reserve = stripped.has(event.id) ? WEEK_STRIP + WEEK_LANE_GAP : 0;
+    const inner = colW - 3;
+    const laneW = (inner - (place.lanes - 1) * WEEK_LANE_GAP) / place.lanes;
     return {
       id: event.id,
       slim: false,
-      x: colX + 1.5,
-      y,
-      w: colW - 3 - reserve,
-      h,
+      x: colX + 1.5 + place.lane * (laneW + WEEK_LANE_GAP),
+      y: weekY(event.start) + 1,
+      w: laneW,
+      h: Math.max(8, (event.end - event.start) * WEEK_PX - 2),
     };
   });
+}
+
+/** Title measure for a week column. It does not change when a lane appears. */
+export function weekTitleWidth(width: number): number {
+  return Math.max(8, weekColumnWidth(width) - 8);
 }
 
 export function inWorkHours(day: number, start: number, end: number): boolean {

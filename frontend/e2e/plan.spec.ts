@@ -442,8 +442,171 @@ test("keyboard-only path", async ({ page }) => {
   await expect(page.getByRole("button", { name: /Budget sheet/ })).toHaveCount(0);
 });
 
+test("week moves stay painted and revert restores every block", async ({ page }, testInfo) => {
+  await press(page.getByTestId("view-switch"), testInfo.project.name);
+  await press(page.getByRole("menuitem", { name: "Week" }), testInfo.project.name);
+  await press(page.getByRole("button", { name: "Plan mode" }), testInfo.project.name);
+  const grid = page.getByTestId("week-grid");
+  const gridBox = await grid.boundingBox();
+  if (!gridBox) throw new Error("week grid missing");
+  const gutter = Number(await grid.getAttribute("data-gutter"));
+  const column = (gridBox.width - gutter - 2) / 7;
+
+  async function painted(title: string) {
+    const host = block(page, title);
+    await expect(host).toBeVisible();
+    const text = host.locator("strong").first();
+    await expect(text).toBeVisible();
+    const hostBox = await host.boundingBox();
+    const textBox = await text.boundingBox();
+    if (!hostBox || !textBox) throw new Error(`${title} has no painted title`);
+    expect(hostBox.width).toBeGreaterThan(12);
+    expect(textBox.height).toBeGreaterThan(6);
+    expect(textBox.x).toBeGreaterThanOrEqual(hostBox.x - 1);
+    expect(textBox.x).toBeLessThan(hostBox.x + hostBox.width);
+  }
+
+  const spec = await center(block(page, "Spec review"));
+  await dragHold(page, spec.x, spec.y, gridBox.x + gutter + column * 2 + column / 2, spec.y);
+  await expect(block(page, "Spec review")).toHaveAttribute("aria-label", /Wed/);
+  await painted("Spec review");
+
+  const budget = block(page, "Budget sheet");
+  await budget.scrollIntoViewIfNeeded();
+  const budgetAt = await center(budget);
+  await dragHold(page, budgetAt.x, budgetAt.y, gridBox.x + gutter + column * 4 + column / 2, budgetAt.y);
+  await expect(budget).toHaveAttribute("aria-label", /Fri/);
+  await painted("Budget sheet");
+
+  await press(page.getByRole("button", { name: "Revert" }), testInfo.project.name);
+  await press(page.getByRole("button", { name: "Revert all" }), testInfo.project.name);
+  await expect(block(page, "Spec review")).toHaveAttribute("aria-label", /Tue/);
+  await painted("Spec review");
+  await painted("Budget sheet");
+  await expect(budget).toHaveAttribute("aria-label", /Proposed/);
+  const star = budget.locator(".corner");
+  await expect(star).toBeVisible();
+  await expect(budget).toContainText("Budget");
+});
+
+test("overlapping events stay side by side in week and day", async ({ page }, testInfo) => {
+  await press(page.getByTestId("view-switch"), testInfo.project.name);
+  await press(page.getByRole("menuitem", { name: "Week" }), testInfo.project.name);
+  const design = await block(page, "Design crit").boundingBox();
+  const coffee = await block(page, "Coffee w/ Jo").boundingBox();
+  if (!design || !coffee) throw new Error("thursday pair missing");
+  expect(design.width).toBeGreaterThan(12);
+  expect(coffee.width).toBeGreaterThan(12);
+  expect(design.x + design.width).toBeLessThanOrEqual(coffee.x + 1);
+  await expect(block(page, "Design crit")).toContainText("Design");
+  await expect(block(page, "Coffee w/ Jo")).toContainText("Coffee");
+
+  await press(page.getByTestId("view-switch"), testInfo.project.name);
+  await press(page.getByRole("menuitem", { name: "Day" }), testInfo.project.name);
+  const spec = await block(page, "Spec review").boundingBox();
+  const vendor = await block(page, "Call vendor").boundingBox();
+  if (!spec || !vendor) throw new Error("tuesday pair missing");
+  expect(spec.width).toBeGreaterThan(40);
+  expect(vendor.width).toBeGreaterThan(40);
+  expect(spec.x + spec.width).toBeLessThanOrEqual(vendor.x + 1);
+});
+
+test("toggling an unrelated calendar does not rewrap a week title", async ({ page }, testInfo) => {
+  await press(page.getByTestId("view-switch"), testInfo.project.name);
+  await press(page.getByRole("menuitem", { name: "Week" }), testInfo.project.name);
+  const before = await block(page, "Design crit").locator("strong").allTextContents();
+  expect(before.join("")).toContain("Design");
+  await press(page.getByTestId("more-button"), testInfo.project.name);
+  await press(page.getByRole("menuitem", { name: /Show/ }), testInfo.project.name);
+  await press(page.getByRole("button", { name: "Personal" }), testInfo.project.name);
+  const after = await block(page, "Design crit").locator("strong").allTextContents();
+  expect(after).toEqual(before);
+});
+
+test("the tray opens from info, drags up, and drags closed", async ({ page }, testInfo) => {
+  const grid = page.getByTestId("day-grid");
+  const before = await grid.boundingBox();
+  await press(page.getByTestId("sync-chip"), testInfo.project.name);
+  const sheet = page.getByTestId("tray-sheet");
+  await expect(sheet).toHaveAttribute("data-open", "1");
+  await expect(sheet).toHaveCSS("transition-duration", "0s");
+  await expect(sheet.getByText("Buy stamps")).toBeVisible();
+  await expect(sheet.getByRole("heading", { name: "Demo · not synced" })).toBeVisible();
+  const after = await grid.boundingBox();
+  if (!before || !after) throw new Error("grid missing");
+  expect(after.height).toBeCloseTo(before.height, 0);
+  expect(after.y).toBeCloseTo(before.y, 0);
+
+  const grip = page.getByTestId("tray-grip");
+  const gripBox = await grip.boundingBox();
+  if (!gripBox) throw new Error("grip missing");
+  const x = gripBox.x + gripBox.width / 2;
+  const y = gripBox.y + gripBox.height / 2;
+  await page.mouse.move(x, y);
+  await page.mouse.down();
+  await page.mouse.move(x, y + 80, { steps: 8 });
+  await page.mouse.up();
+  await expect(sheet).toHaveAttribute("data-open", "0");
+
+  await page.mouse.move(x, y);
+  await page.mouse.down();
+  await page.mouse.move(x, y - 80, { steps: 8 });
+  await page.mouse.up();
+  await expect(sheet).toHaveAttribute("data-open", "1");
+  await expect(page.getByTestId("unscheduled")).toContainText("Unscheduled");
+  await expect(page.getByTestId("sync-chip")).toContainText("Demo · not synced");
+});
+
+test("a week block opens in place and the day header opens that day", async ({ page }, testInfo) => {
+  await press(page.getByTestId("view-switch"), testInfo.project.name);
+  await press(page.getByRole("menuitem", { name: "Week" }), testInfo.project.name);
+  await press(block(page, "Design crit"), testInfo.project.name);
+  await expect(page.getByRole("heading", { name: "Design crit" })).toBeVisible();
+  await expect(page.locator(".v3")).toHaveAttribute("data-mode", "week");
+  await page.keyboard.press("Escape");
+  await press(page.locator(".week-head").filter({ hasText: "12" }), testInfo.project.name);
+  await expect(page.locator(".v3")).toHaveAttribute("data-mode", "day");
+  await expect(page.getByRole("heading", { name: "Thu, Nov 12" })).toBeVisible();
+});
+
+test("moving a proposal decides it, counts as a move, and revert restores it", async ({ page }, testInfo) => {
+  await press(page.getByTestId("view-switch"), testInfo.project.name);
+  await press(page.getByRole("menuitem", { name: "Week" }), testInfo.project.name);
+  await press(page.getByRole("button", { name: "Plan mode" }), testInfo.project.name);
+  const budget = block(page, "Budget sheet");
+  await budget.scrollIntoViewIfNeeded();
+  const at = await center(budget);
+  await dragHold(page, at.x, at.y, at.x, at.y + 70);
+  await expect(page.getByTestId("plan-banner")).toContainText("1 move");
+  await expect(page.getByTestId("plan-banner")).toContainText("agent suggests 1");
+  await expect(budget).not.toHaveAttribute("aria-label", /Proposed/);
+  await press(budget, testInfo.project.name);
+  await expect(page.getByRole("heading", { name: "Budget sheet" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Approve", exact: true })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Deny", exact: true })).toHaveCount(0);
+  await page.keyboard.press("Escape");
+  await page.reload();
+  await expect(page.getByTestId("plan-banner")).toContainText("1 move");
+  await expect(block(page, "Budget sheet")).not.toHaveAttribute("aria-label", /Proposed/);
+  await press(page.getByRole("button", { name: "Revert" }), testInfo.project.name);
+  await press(page.getByRole("button", { name: "Revert all" }), testInfo.project.name);
+  await expect(block(page, "Budget sheet")).toHaveAttribute("aria-label", /Proposed/);
+  await page.reload();
+  await expect(block(page, "Budget sheet")).toHaveAttribute("aria-label", /Proposed/);
+  await expect(page.getByTestId("plan-banner")).toHaveCount(0);
+});
+
 test.describe("motion", () => {
   test.use({ reducedMotion: "no-preference" });
+
+  test("the tray sheet eases open", async ({ page }) => {
+    const duration = await page.locator(".tray-sheet").evaluate((node) => getComputedStyle(node).transitionDuration);
+    expect(duration).not.toBe("0s");
+    await page.getByTestId("sync-chip").click();
+    await expect(page.getByTestId("tray-sheet")).toHaveAttribute("data-open", "1");
+    const grid = await page.getByTestId("day-grid").boundingBox();
+    expect(grid?.height).toBeGreaterThan(100);
+  });
 
   test("opening Review does not scroll the page or overshoot the sheet", async ({ page }, testInfo) => {
     await press(page.getByTestId("plan-button"), testInfo.project.name);

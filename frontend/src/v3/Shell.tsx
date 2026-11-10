@@ -22,6 +22,7 @@ import {
   nearMark,
   weekBoxes,
   weekColumnWidth,
+  weekTitleWidth,
   weekY,
   type DayBox,
   type TapBox,
@@ -41,7 +42,6 @@ import {
   domainLabel,
   exactClock,
   gutterClock,
-  nubLabel,
   quickToast,
   rangeLabel,
   shortRange,
@@ -50,7 +50,7 @@ import {
 import { COMMIT_PX, gestureDown, gestureMove, gestureUp, HOLD_MS, holdReady, type Gesture } from "./gesture";
 import { CheckGlyph, Chevron, MoreGlyph, PlanGlyph, SearchGlyph, Sparkle } from "./icons";
 import { ALL_SHOWN, buildEvents, showSummary, visibleEvents, withMove, type CalEvent, type ShowFilters } from "./model";
-import { approveDisabled, enterPlan, exitPlan, includedIds, initialPlan, proposalsOnDays, stageMove, toggleSkip, type PlanSession, type StagedMove } from "./session";
+import { approveDisabled, enterPlan, exitPlan, includedIds, loadPlan, pendingProposalIds, proposalsOnDays, savePlan, stageMove, toggleSkip, type PlanSession, type StagedMove } from "./session";
 import { wrapWeekTitle } from "./titles";
 import { showUndo, type UndoToast } from "./undo";
 import "./v3.css";
@@ -136,7 +136,15 @@ export function CalendarShell(props: Props) {
   const timeZone = props.meta?.display_timezone || "America/Indianapolis";
   const [mode, setMode] = useState<"day" | "week">("day");
   const [anchor, setAnchor] = useState(() => PlanTime.dayKey(new Date(), timeZone));
-  const [plan, setPlan] = useState<PlanSession>(initialPlan);
+  const [plan, setPlanState] = useState<PlanSession>(() => loadPlan());
+  const [trayOpen, setTrayOpen] = useState(false);
+  function setPlan(next: PlanSession | ((current: PlanSession) => PlanSession)) {
+    setPlanState((current) => {
+      const resolved = typeof next === "function" ? next(current) : next;
+      savePlan(resolved);
+      return resolved;
+    });
+  }
   const [filters, setFilters] = useState<ShowFilters>(ALL_SHOWN);
   const [query, setQuery] = useState("");
   const [overlay, setOverlayState] = useState<Overlay>(null);
@@ -199,7 +207,10 @@ export function CalendarShell(props: Props) {
   const baseEvents = useMemo(() => {
     return serverEvents.map((event) => {
       const move = plan.active ? plan.moves.find((item) => item.id === event.id) : undefined;
-      if (move) return withMove(event, move.to.start, move.to.end, timeZone);
+      if (move) {
+        const placed = withMove(event, move.to.start, move.to.end, timeZone);
+        return event.kind === "proposal" ? { ...placed, state: "approved" as const } : placed;
+      }
       const override = overrides[event.id];
       if (override) return withMove(event, override.start, override.end, timeZone);
       return event;
@@ -219,7 +230,10 @@ export function CalendarShell(props: Props) {
 
   const dayEvents = shown.filter((event) => event.dayKey === anchor);
   const weekEvents = shown.filter((event) => weekKeys.includes(event.dayKey));
-  const rangeIds = proposalsOnDays(events, mode === "day" ? [anchor] : weekKeys).map((event) => event.id);
+  const rangeIds = pendingProposalIds(
+    proposalsOnDays(events, mode === "day" ? [anchor] : weekKeys).map((event) => event.id),
+    plan.moves,
+  );
   const included = includedIds(rangeIds, plan.skipped);
   const unsavedFits = bannerText(plan.moves.length, rangeIds.length, true).length < 42;
   const banner = bannerText(plan.moves.length, rangeIds.length, unsavedFits && plan.moves.length > 0 && rangeIds.length === 0);
@@ -595,21 +609,14 @@ export function CalendarShell(props: Props) {
       const released = gestureMove(current, point, performance.now());
       const result = gestureUp(released);
       if (native.type !== "pointercancel" && result.tap) {
-        const dayKey = event.dayKey;
         const eventId = event.id;
-        const weekTap = mode === "week";
         let sawClick = false;
         const note = () => { sawClick = true; };
         window.addEventListener("click", note, true);
         window.setTimeout(() => {
           window.removeEventListener("click", note, true);
           if (sawClick) return;
-          if (weekTap) {
-            setAnchor(dayKey);
-            setMode("day");
-          } else {
-            setOverlay({ kind: "event", id: eventId });
-          }
+          setOverlay({ kind: "event", id: eventId });
         }, 80);
       }
       if (result.commit && released.phase === "lifted") {
@@ -645,6 +652,24 @@ export function CalendarShell(props: Props) {
   function onPointerDown(event: CalEvent, pointer: React.PointerEvent<HTMLButtonElement>) {
     if (pointer.button !== 0) return;
     startGesture(event, pointer);
+  }
+
+  function onTrayPointer(pointer: React.PointerEvent<HTMLButtonElement>) {
+    if (pointer.button !== 0) return;
+    const startY = pointer.clientY;
+    const pointerId = pointer.pointerId;
+    const opened = trayOpen;
+    function up(native: PointerEvent) {
+      if (native.pointerId !== pointerId) return;
+      window.removeEventListener("pointerup", up);
+      window.removeEventListener("pointercancel", up);
+      const dy = native.clientY - startY;
+      if (dy <= -24) setTrayOpen(true);
+      else if (dy >= 24) setTrayOpen(false);
+      else if (Math.abs(dy) < 8) setTrayOpen(!opened);
+    }
+    window.addEventListener("pointerup", up);
+    window.addEventListener("pointercancel", up);
   }
 
   function nudge(event: CalEvent, minutes: number, days: number) {
@@ -718,7 +743,9 @@ export function CalendarShell(props: Props) {
         method: "POST",
         body: JSON.stringify({ confirmed: true, moves, approvals }),
       });
-      const message = approvedToast(moves.length, approvals.length);
+      const moved = new Set(plan.moves.map((item) => item.id));
+      const extraProposals = approvals.filter((item) => !moved.has(item.proposal_id)).length;
+      const message = approvedToast(plan.moves.length, extraProposals);
       setPlan(exitPlan());
       setOverlay(null);
       glowIds([...moves.map((item) => item.block_id), ...approvals.map((item) => item.proposal_id)]);
@@ -900,24 +927,35 @@ export function CalendarShell(props: Props) {
               openId={overlay?.kind === "event" ? overlay.id : null}
               onPointerDown={onPointerDown}
               onKeyDown={onBlockKey}
-              onOpenDay={(key) => {
+              onOpen={(event) => {
                 if (suppressClick.current) {
                   suppressClick.current = false;
                   return;
                 }
-                setAnchor(key);
-                setMode("day");
+                setOverlay({ kind: "event", id: event.id });
               }}
             />
           )}
         </div>
       </div>
+      <div className="tray-sheet" data-open={trayOpen ? "1" : "0"} data-testid="tray-sheet" role="dialog" aria-label="Calendar tray" aria-hidden={trayOpen ? undefined : true}>
+        <button type="button" className="tray-grip" data-testid="tray-sheet-grip" aria-label="Calendar tray" onPointerDown={onTrayPointer} />
+        <div className="tray-sheet-body">
+          <h2>Unscheduled</h2>
+          <p className="sub">{loose.length === 0 ? "Everything is on the calendar." : "These tasks are not on the calendar yet."}</p>
+          {loose.map((task) => (
+            <div key={task.id} className="row">{task.title}</div>
+          ))}
+          <h2>{syncText}</h2>
+          <p className="sub">{props.meta?.sync_label}</p>
+        </div>
+      </div>
       <div className="v3-tray">
-        <span className="tray-grip" aria-hidden="true" />
-        <button type="button" className="unscheduled" data-testid="unscheduled" onClick={() => setOverlay({ kind: "unscheduled" })}>
+        <button type="button" className="tray-grip" data-testid="tray-grip" aria-label="Calendar tray" onPointerDown={onTrayPointer} />
+        <button type="button" className="unscheduled" data-testid="unscheduled" onClick={() => setTrayOpen(true)}>
           Unscheduled <b>{loose.length}</b>
         </button>
-        <button type="button" className="sync-chip" data-testid="sync-chip" onClick={() => setOverlay({ kind: "sync" })}>
+        <button type="button" className="sync-chip" data-testid="sync-chip" onClick={() => setTrayOpen(true)}>
           <i aria-hidden="true" /> {syncText}
         </button>
       </div>
@@ -1303,7 +1341,7 @@ function WeekCanvas(props: {
   openId: string | null;
   onPointerDown: (event: CalEvent, pointer: React.PointerEvent<HTMLButtonElement>) => void;
   onKeyDown: (event: CalEvent, key: React.KeyboardEvent) => void;
-  onOpenDay: (dayKey: string) => void;
+  onOpen: (event: CalEvent) => void;
 }) {
   const colW = weekColumnWidth(props.width);
   const timed = props.events.map((event) => ({
@@ -1341,20 +1379,7 @@ function WeekCanvas(props: {
         const dx = lifted && props.drag ? (props.drag.dayIndex - originDay) * colW : 0;
         const dy = lifted && props.drag ? weekY(props.drag.startHour) - weekY(event.startHour) : 0;
         const moved = dx === 0 && dy === 0 ? box : { ...box, x: box.x + dx, y: box.y + dy };
-        if (box.slim) {
-          return (
-            <button
-              key={event.id}
-              type="button"
-              className="slim"
-              style={{ left: moved.x, top: moved.y, width: moved.w, height: moved.h, background: fill(event.domain), color: line(event.domain) }}
-              aria-label={nubLabel(event.title, event.startHour, event.endHour)}
-              aria-description="Opens the day"
-              onClick={() => props.onOpenDay(event.dayKey)}
-            />
-          );
-        }
-        const lines = wrapWeekTitle(event.title, Math.max(8, box.w - 8), Math.max(1, Math.floor((box.h - 3) / 13)), measure);
+        const lines = wrapWeekTitle(event.title, weekTitleWidth(props.width), Math.max(1, Math.floor((box.h - 3) / 13)), measure);
         const motion = settleMotion(props.settle, event.id);
         const locked = props.lockId === event.id ? "settle-lock" : "";
         return (
@@ -1367,7 +1392,7 @@ function WeekCanvas(props: {
             data-testid={`block-${event.id}`}
             onPointerDown={(pointer) => props.onPointerDown(event, pointer)}
             onKeyDown={(key) => props.onKeyDown(event, key)}
-            onClick={() => props.onOpenDay(event.dayKey)}
+            onClick={() => props.onOpen(event)}
             onContextMenu={(menu) => menu.preventDefault()}
           >
             <span
