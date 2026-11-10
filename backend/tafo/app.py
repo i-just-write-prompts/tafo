@@ -145,6 +145,35 @@ def _require_decision(request: Request) -> str:
     return "human"
 
 
+def _instants_match(left: str, right: str) -> bool:
+    try:
+        return parse_utc(left) == parse_utc(right)
+    except Problem:
+        return left == right
+
+
+def _with_outcome(finished: dict, requested) -> dict:
+    """Say whether this committed item actually landed on the calendar."""
+    raw = requested.model_dump() if hasattr(requested, "model_dump") else dict(requested)
+    outbox = finished.get("outbox") or {}
+    status = outbox.get("status")
+    block = finished.get("block")
+    proposal = finished.get("proposal") or {}
+    saved = status in {"simulated", "synced"} or (status is None and proposal.get("status") == "approved")
+    starts = raw.get("starts_at")
+    ends = raw.get("ends_at")
+    if starts and ends:
+        saved = bool(saved and block is not None and _instants_match(block["starts_at"], starts) and _instants_match(block["ends_at"], ends))
+    title = (block or {}).get("title") or raw.get("title") or ""
+    return {
+        **finished,
+        "saved": saved,
+        "outcome": "saved" if saved else "not_synced",
+        "item_id": raw.get("block_id") or raw.get("proposal_id") or proposal.get("id"),
+        "item_title": title,
+    }
+
+
 def _finish(settings: Settings, adapter: CalendarAdapter, staged: dict) -> dict:
     outbox = None
     block = None
@@ -485,10 +514,9 @@ def create_app(settings: Settings | None = None, adapter: CalendarAdapter | None
                 approvals=[item.model_dump() for item in body.approvals],
                 actor="human",
             )
-        return {
-            "moves": [_finish(settings, adapter, item) for item in staged["moves"]],
-            "approvals": [_finish(settings, adapter, item) for item in staged["approvals"]],
-        }
+        finished_moves = [_with_outcome(_finish(settings, adapter, item), requested) for item, requested in zip(staged["moves"], body.moves, strict=True)]
+        finished_approvals = [_with_outcome(_finish(settings, adapter, item), requested) for item, requested in zip(staged["approvals"], body.approvals, strict=True)]
+        return {"moves": finished_moves, "approvals": finished_approvals}
 
     @app.post("/api/decisions/{proposal_id}/approve", tags=["decisions"])
     def post_approve(proposal_id: str, body: DecisionBody, request: Request) -> dict:

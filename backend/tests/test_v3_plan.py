@@ -198,6 +198,112 @@ def test_commit_rolls_back_when_one_approval_is_stale(tmp_path):
         client.__exit__(None, None, None)
 
 
+def test_failed_calendar_write_keeps_the_old_time_and_reports_it(tmp_path):
+    from tafo.calendar_adapter import AdapterResult, build_adapter
+
+    settings = settings_for(tmp_path)
+    V3Week.load(settings.db_path)
+    inner = build_adapter(settings)
+
+    class FailUpdate:
+        mode = "demo"
+
+        def __init__(self):
+            self.keys: set[str] = set()
+
+        def read_busy(self, *args, **kwargs):
+            return inner.read_busy(*args, **kwargs)
+
+        def create_block(self, *args, **kwargs):
+            return inner.create_block(*args, **kwargs)
+
+        def cancel_block(self, *args, **kwargs):
+            return inner.cancel_block(*args, **kwargs)
+
+        def update_block(self, event_key, payload, known_google_id=None):
+            if event_key in self.keys:
+                return AdapterResult(
+                    ok=False,
+                    status="failed",
+                    sync_state="not_synced",
+                    google_event_id=None,
+                    honest_label="Not synced. The calendar write failed.",
+                    steps=[],
+                    error="forced_failure",
+                    mode="demo",
+                )
+            return inner.update_block(event_key, payload, known_google_id)
+
+    gate = FailUpdate()
+    client = TestClient(create_app(settings, adapter=gate))
+    client.__enter__()
+    try:
+        spec = block_named(client, "Spec review")
+        closet = proposal_named(client, "Fix closet door")
+        gate.keys.add(spec["id"])
+        response = client.post(
+            "/api/decisions/plan/commit",
+            json={
+                "confirmed": True,
+                "moves": [
+                    {
+                        "block_id": spec["id"],
+                        "expected_version": spec["version"],
+                        "starts_at": local(2, 9, 30),
+                        "ends_at": local(2, 11),
+                        "idempotency_key": "v3-plan-spec-fail-write",
+                        "title": "Spec review",
+                    }
+                ],
+                "approvals": [{"proposal_id": closet["id"], "expected_version": closet["version"]}],
+            },
+        )
+        assert response.status_code == 200, response.text
+        body = response.json()
+        assert body["moves"][0]["saved"] is False
+        assert body["moves"][0]["outcome"] == "not_synced"
+        assert body["moves"][0]["item_title"] == "Spec review"
+        assert body["approvals"][0]["saved"] is True
+        fresh = block_named(client, "Spec review")
+        assert fresh["starts_at"] == spec["starts_at"]
+        assert fresh["version"] == spec["version"]
+        assert proposal_named(client, "Fix closet door")["status"] == "approved"
+    finally:
+        client.__exit__(None, None, None)
+
+
+def test_plan_commit_requires_the_ui_session(tmp_path):
+    client = open_week(tmp_path)
+    try:
+        spec = block_named(client, "Spec review")
+        closet = proposal_named(client, "Fix closet door")
+        original = spec["starts_at"]
+        client.inject_ui_session = False
+        body = {
+            "confirmed": True,
+            "moves": [
+                {
+                    "block_id": spec["id"],
+                    "expected_version": spec["version"],
+                    "starts_at": local(2, 9, 30),
+                    "ends_at": local(2, 11),
+                    "idempotency_key": "v3-plan-no-session",
+                    "title": "Spec review",
+                }
+            ],
+            "approvals": [{"proposal_id": closet["id"], "expected_version": closet["version"]}],
+        }
+        missing = client.post("/api/decisions/plan/commit", json=body)
+        assert missing.status_code == 403
+        assert missing.json()["detail"]["code"] == "ui_session_required"
+        agent = client.post("/api/decisions/plan/commit", json=body, headers={"X-TAFO-Actor": "agent"})
+        assert agent.status_code == 403
+        assert block_named(client, "Spec review")["starts_at"] == original
+        assert proposal_named(client, "Fix closet door")["status"] == "pending"
+    finally:
+        client.__exit__(None, None, None)
+
+
 def test_commit_refuses_an_empty_plan(tmp_path):
     client = open_week(tmp_path)
     try:

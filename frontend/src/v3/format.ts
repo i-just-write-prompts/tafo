@@ -140,6 +140,23 @@ export function approvedToast(moves: number, proposals: number): string {
   return `Approved ${plural(moves, "move")} + ${plural(proposals, "proposal")}`;
 }
 
+function joinedNames(names: string[]): string {
+  if (names.length <= 1) return names[0] || "A move";
+  if (names.length === 2) return `${names[0]} and ${names[1]}`;
+  return `${names.slice(0, -1).join(", ")}, and ${names[names.length - 1]}`;
+}
+
+/** Names the moves that stayed in the draft. Never claims that nothing changed. */
+export function partialPlanToast(saved: number, requested: number, unsaved: string[]): string {
+  const names = joinedNames(unsaved);
+  const single = unsaved.length <= 1;
+  const tail = `${names} ${single ? "isn't" : "aren't"} synced and ${single ? "is" : "are"} still in your plan.`;
+  if (saved <= 0) return tail;
+  return `Saved ${saved} of ${requested}. ${tail}`;
+}
+
+export const SAVE_UNCONFIRMED = "The save went through, but the calendar didn't refresh. Your plan is still here.";
+
 export function denyToast(title: string): string {
   return `Denied · ${title} → Unscheduled`;
 }

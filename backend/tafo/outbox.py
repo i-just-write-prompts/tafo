@@ -115,7 +115,7 @@ def _apply_block(conn: sqlite3.Connection, row: sqlite3.Row, payload: dict, resu
         conn.execute(
             """
             UPDATE calendar_blocks
-            SET sync_state = 'not_synced', honest_label = ?, updated_at = ?, version = version + 1
+            SET sync_state = 'not_synced', honest_label = ?, updated_at = ?
             WHERE id = ?
             """,
             (result.honest_label, now, event_key),

@@ -250,6 +250,30 @@ export function weekBoxes(events: WeekEvent[], width: number): WeekBox[] {
   });
 }
 
+/** Widen a visible week block into hidden neighbours. The reserved lane width stays `box.w`. */
+export function paintedWeekSpan(box: WeekBox, boxes: WeekBox[], visibleIds: ReadonlySet<string>, width: number): { x: number; w: number } {
+  const colW = weekColumnWidth(width);
+  const dayOf = (item: WeekBox) => Math.floor((item.x - WEEK_GUTTER + 1) / colW);
+  const day = dayOf(box);
+  const cluster = boxes
+    .filter((other) => dayOf(other) === day && other.y < box.y + box.h && box.y < other.y + other.h)
+    .sort((a, b) => a.x - b.x);
+  const mine = cluster.findIndex((item) => item.id === box.id);
+  if (mine < 0) return { x: box.x, w: box.w };
+  let left = mine;
+  while (left > 0 && !visibleIds.has(cluster[left - 1].id)) left -= 1;
+  let right = mine;
+  while (right < cluster.length - 1 && !visibleIds.has(cluster[right + 1].id)) right += 1;
+  const span = cluster.slice(left, right + 1);
+  const visible = span.filter((item) => visibleIds.has(item.id));
+  const start = span[0].x;
+  const end = span[span.length - 1].x + span[span.length - 1].w;
+  if (visible.length <= 1) return { x: start, w: end - start };
+  const each = (end - start - WEEK_LANE_GAP * (visible.length - 1)) / visible.length;
+  const index = visible.findIndex((item) => item.id === box.id);
+  return { x: start + index * (each + WEEK_LANE_GAP), w: each };
+}
+
 /** Title measure for a week column. It does not change when a lane appears. */
 export function weekTitleWidth(width: number): number {
   return Math.max(8, weekColumnWidth(width) - 8);

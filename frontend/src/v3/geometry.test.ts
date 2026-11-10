@@ -9,6 +9,7 @@ import {
   drawnHeight,
   moveByPointer,
   snapHour,
+  paintedWeekSpan,
   weekBoxes,
   WEEK_LANE_GAP,
 } from "./geometry";
@@ -82,6 +83,12 @@ describe("week geometry and drag", () => {
     expect(main && other && main.w).toBeGreaterThan(12);
     expect(other && other.w).toBeGreaterThan(12);
     expect(main && other ? other.x - (main.x + main.w) : 0).toBeCloseTo(WEEK_LANE_GAP, 5);
+    if (!main || !other) throw new Error("pair missing");
+    const filled = paintedWeekSpan(main, boxes, new Set(["h2"]), 390);
+    expect(filled.x).toBeCloseTo(main.x, 5);
+    expect(filled.w).toBeGreaterThan(main.w + other.w - 1);
+    const both = paintedWeekSpan(main, boxes, new Set(["h2", "h5"]), 390);
+    expect(both.w).toBeCloseTo(main.w, 5);
   });
 
   it("snaps to 15 minutes and can change day only in week", () => {

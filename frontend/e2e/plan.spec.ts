@@ -31,11 +31,19 @@ async function expectClearOfEvents(page: Page, toast: Locator) {
   await expect(page.getByTestId("unscheduled")).toContainText("Unscheduled");
   await expect(page.getByTestId("sync-chip")).toContainText("Demo · not synced");
   const grip = await page.getByTestId("tray-grip").boundingBox();
-  if (grip) {
+  const gridBox = await page.locator(".v3-grid").boundingBox();
+  if (grip && gridBox) {
     expect(grip.height).toBeGreaterThanOrEqual(44);
-    expect(grip.width).toBeGreaterThanOrEqual(44);
-    if (intersection(grip, toastBox)) expect(false, "toast overlaps the tray grip").toBe(true);
+    expect(grip.y).toBeGreaterThanOrEqual(tray.y - 1);
+    expect(grip.y + grip.height).toBeLessThanOrEqual(tray.y + tray.height + 1);
+    expect(grip.y).toBeGreaterThanOrEqual(gridBox.y + gridBox.height - 1);
   }
+  const hit = await toast.evaluate((node) => {
+    const rect = node.getBoundingClientRect();
+    const target = document.elementFromPoint(rect.x + rect.width / 2, rect.y + rect.height / 2);
+    return target instanceof Element ? target.closest("[data-testid='plan-toast'], [data-testid='tray-grip']")?.getAttribute("data-testid") : null;
+  });
+  expect(hit).toBe("plan-toast");
   for (const id of ["unscheduled", "sync-chip"]) {
     const control = await page.getByTestId(id).boundingBox();
     if (control && intersection(control, toastBox)) {
@@ -96,6 +104,10 @@ test("quick drag saves with a toast and Undo", async ({ page }, testInfo) => {
   await dragHold(page, start.x, start.y, start.x, start.y + 60);
   const toast = page.getByTestId("plan-toast");
   await expect(toast).toContainText("Call vendor → 11:00 AM");
+  const savedVendor = await calendarState(page);
+  const vendorBlock = savedVendor.blocks.find((item) => item.title === "Call vendor");
+  expect(vendorBlock && uiWhen(vendorBlock.starts_at)).toContain("Tue, Nov 10");
+  expect(new Intl.DateTimeFormat("en-US", { timeZone: "America/Indianapolis", hour: "numeric", minute: "2-digit", hour12: true }).format(new Date(vendorBlock!.starts_at))).toBe("11:00 AM");
   const undo = toast.getByRole("button", { name: "Undo" });
   await expect(undo).toBeVisible();
   const undoBox = await undo.boundingBox();
@@ -396,7 +408,15 @@ test("rearrange several items then Approve all", async ({ page }, testInfo) => {
   await shot(page, testInfo, "review");
   await press(approve, testInfo.project.name);
   const approved = page.getByTestId("plan-toast");
+  const staged = JSON.parse(await page.evaluate(() => localStorage.getItem("tafo.v3.plan.v2") || "null"));
   await expect(approved).toContainText("Approved 3 moves + 2 proposals");
+  const committed = await calendarState(page);
+  for (const move of staged.moves) {
+    const row = committed.blocks.find((item) => item.id === move.id);
+    expect(Date.parse(row.starts_at)).toBe(Date.parse(move.to.start));
+    expect(Date.parse(row.ends_at)).toBe(Date.parse(move.to.end));
+  }
+  expect(committed.proposals.filter((item) => item.kind === "calendar_block" && item.status === "pending")).toHaveLength(0);
   await expectOneLine(approved);
   await expectClearOfEvents(page, approved);
   await expect(page.getByRole("button", { name: /Budget sheet,.*Proposed/ })).toHaveCount(0);
@@ -636,6 +656,16 @@ test("B4 tray info tap and grip drag", async ({ page }, testInfo) => {
 
   await dragGrip(page, testInfo.project.name, x, y, -80);
   await expect(sheet).toHaveAttribute("data-open", "1");
+  const handle = page.getByTestId("tray-sheet-grip");
+  const handleBox = await handle.boundingBox();
+  if (!handleBox) throw new Error("sheet grip missing");
+  expect(handleBox.height).toBeGreaterThanOrEqual(28);
+  expect(handleBox.width).toBeGreaterThan(40);
+  await expect(handle).toHaveCSS("touch-action", "none");
+  await dragGrip(page, testInfo.project.name, handleBox.x + handleBox.width / 2, handleBox.y + 12, 200);
+  await expect(sheet).toHaveAttribute("data-open", "0");
+  await press(page.getByTestId("sync-chip"), testInfo.project.name);
+  await expect(sheet).toHaveAttribute("data-open", "1");
   await expect(sheet).not.toContainText("NOT synced");
   await expect(page.getByTestId("unscheduled")).toContainText("Unscheduled");
   await expect(page.getByTestId("sync-chip")).toContainText("Demo · not synced");
@@ -650,6 +680,49 @@ test("B4 tray info tap and grip drag", async ({ page }, testInfo) => {
   else await page.touchscreen.tap(outside.x, outside.y);
   await expect(sheet).toHaveAttribute("data-open", "0");
   await expect(page.getByRole("heading", { name: "Call vendor" })).toHaveCount(0);
+});
+
+test("E3 a tap in the calendar's bottom band opens the event", async ({ page }, testInfo) => {
+  const tray = await page.locator(".v3-tray").boundingBox();
+  const grip = await page.getByTestId("tray-grip").boundingBox();
+  const grid = await page.getByTestId("day-grid").boundingBox();
+  if (!tray || !grip || !grid) throw new Error("tray missing");
+  expect(grip.y).toBeGreaterThanOrEqual(tray.y - 1);
+  expect(grip.y).toBeGreaterThanOrEqual(grid.y + grid.height - 1);
+  const target = await page.evaluate(() => {
+    const scroller = document.querySelector(".v3-grid");
+    const blocks = [...document.querySelectorAll(".v3-grid .block")];
+    if (!(scroller instanceof HTMLElement) || blocks.length === 0) return null;
+    const lowest = blocks.reduce((best, node) => {
+      const box = node.getBoundingClientRect();
+      return !best || box.bottom > best.getBoundingClientRect().bottom ? node : best;
+    }, null as Element | null);
+    if (!(lowest instanceof HTMLElement)) return null;
+    const gridRect = scroller.getBoundingClientRect();
+    const blockRect = lowest.getBoundingClientRect();
+    scroller.scrollTop += blockRect.bottom - (gridRect.bottom - 20);
+    const next = lowest.getBoundingClientRect();
+    const y = Math.min(next.bottom - 8, gridRect.bottom - 12);
+    return {
+      x: next.left + Math.min(next.width / 2, 28),
+      y,
+      title: (lowest.getAttribute("aria-label") || "").split(",")[0],
+      id: lowest.getAttribute("data-testid"),
+    };
+  });
+  if (!target) throw new Error("no event in the bottom band");
+  const owner = await page.evaluate(({ x, y }) => {
+    const node = document.elementFromPoint(x, y);
+    const block = node instanceof Element ? node.closest(".block") : null;
+    const gripHit = node instanceof Element ? node.closest("[data-testid='tray-grip']") : null;
+    return { block: block?.getAttribute("data-testid") || "", grip: Boolean(gripHit) };
+  }, target);
+  expect(owner.grip).toBe(false);
+  expect(owner.block).toBe(target.id);
+  if (testInfo.project.name === "desktop") await page.mouse.click(target.x, target.y);
+  else await page.touchscreen.tap(target.x, target.y);
+  await expect(page.getByRole("heading", { name: target.title, exact: true })).toBeVisible();
+  await expect(page.getByTestId("tray-sheet")).toHaveAttribute("data-open", "0");
 });
 
 test("B5 week block opens in place and the header opens the day", async ({ page }, testInfo) => {
@@ -750,6 +823,8 @@ test("V2 approve all persists and the toast matches the server", async ({ page }
   const column = await page.locator(".workband").first().evaluate((node) => node.getBoundingClientRect().width);
   await uiDrag(page, testInfo.project.name, at.x, at.y, at.x + column, at.y);
   await expect(page.getByTestId("plan-banner")).toContainText("1 move");
+  const staged = JSON.parse(await page.evaluate(() => localStorage.getItem("tafo.v3.plan.v2") || "null"));
+  const stagedSpec = staged.moves.find((item: { id: string }) => item.id === specBefore.id);
   await press(page.getByRole("button", { name: "Review", exact: true }), testInfo.project.name);
   await press(page.getByRole("button", { name: /Approve all/ }), testInfo.project.name);
   const toast = page.getByTestId("plan-toast");
@@ -761,6 +836,7 @@ test("V2 approve all persists and the toast matches the server", async ({ page }
     const specRow = state.blocks.find((item) => item.title === "Spec review" && item.status === "scheduled");
     if (!specRow) throw new Error("spec missing after approve");
     expect(specRow.starts_at).not.toBe(specBefore.starts_at);
+    expect(Date.parse(specRow.starts_at)).toBe(Date.parse(stagedSpec.to.start));
     if (await page.locator(".v3").getAttribute("data-mode") !== "week") {
       await press(page.getByTestId("view-switch"), testInfo.project.name);
       await press(page.getByRole("menuitem", { name: "Week", exact: true }), testInfo.project.name);
@@ -790,6 +866,117 @@ test("V2 approve all persists and the toast matches the server", async ({ page }
   await agreed();
   await page.reload();
   await agreed();
+});
+
+test("R1 a failed calendar write stays in the plan", async ({ page }, testInfo) => {
+  const before = await calendarState(page);
+  const specBefore = before.blocks.find((item) => item.title === "Spec review");
+  const closetBefore = before.proposals.find((item) => item.kind === "calendar_block" && before.tasks.some((task) => task.id === item.payload.task_id && task.title === "Fix closet door"));
+  if (!specBefore || !closetBefore) throw new Error("fixture missing");
+  await press(page.getByTestId("view-switch"), testInfo.project.name);
+  await press(page.getByRole("menuitem", { name: "Week" }), testInfo.project.name);
+  await press(page.getByRole("button", { name: "Plan mode" }), testInfo.project.name);
+  const spec = block(page, "Spec review");
+  await spec.scrollIntoViewIfNeeded();
+  const at = await center(spec);
+  const column = await page.locator(".workband").first().evaluate((node) => node.getBoundingClientRect().width);
+  await uiDrag(page, testInfo.project.name, at.x, at.y, at.x + column, at.y);
+  await expect(page.getByTestId("plan-banner")).toContainText("1 move");
+  const armed = await page.request.post("/api/e2e/fail-writes", { data: { event_keys: [specBefore.id] } });
+  expect(armed.ok()).toBeTruthy();
+  await press(page.getByRole("button", { name: "Review", exact: true }), testInfo.project.name);
+  await press(page.getByRole("button", { name: /Approve all/ }), testInfo.project.name);
+  const toast = page.getByTestId("plan-toast");
+  await expect(toast).toContainText("Spec review isn't synced and is still in your plan");
+  await expect(toast).toContainText("Saved 2 of 3");
+  await expect(toast).not.toContainText("Nothing was changed");
+  const after = await calendarState(page);
+  const specRow = after.blocks.find((item) => item.id === specBefore.id);
+  expect(specRow?.starts_at).toBe(specBefore.starts_at);
+  expect(after.proposals.find((item) => item.id === closetBefore.id)?.status).toBe("approved");
+  const draft = JSON.parse(await page.evaluate(() => localStorage.getItem("tafo.v3.plan.v2") || "null"));
+  expect(draft.moves.map((item: { id: string }) => item.id)).toEqual([specBefore.id]);
+  expect(draft.active).toBe(true);
+});
+
+test("R1 a missed refresh does not say the plan failed", async ({ page }, testInfo) => {
+  let commitLanded = false;
+  await page.route("**/api/calendar/blocks", async (route) => {
+    if (commitLanded && route.request().method() === "GET") {
+      await route.abort();
+      return;
+    }
+    await route.continue();
+  });
+  page.on("response", (response) => {
+    if (response.url().includes("/api/decisions/plan/commit") && response.status() === 200) commitLanded = true;
+  });
+  await press(page.getByRole("button", { name: "Plan mode" }), testInfo.project.name);
+  const vendor = await center(block(page, "Call vendor,"));
+  await dragHold(page, vendor.x, vendor.y, vendor.x, vendor.y + 60);
+  await press(page.getByRole("button", { name: "Review", exact: true }), testInfo.project.name);
+  await press(page.getByRole("button", { name: /Approve all/ }), testInfo.project.name);
+  const toast = page.getByTestId("plan-toast");
+  await expect(toast).toContainText("The save went through, but the calendar didn't refresh");
+  await expect(toast).not.toContainText("failed");
+  await expect(toast).not.toContainText("Nothing was changed");
+  const draft = JSON.parse(await page.evaluate(() => localStorage.getItem("tafo.v3.plan.v2") || "null"));
+  expect(draft.moves.length).toBeGreaterThan(0);
+  await page.unroute("**/api/calendar/blocks");
+  const after = await calendarState(page);
+  const moved = after.blocks.find((item) => item.title === "Call vendor");
+  expect(moved && Date.parse(moved.starts_at)).not.toBe(Date.parse("2026-11-10T15:00:00Z"));
+});
+
+test("R2 a stale draft does not overwrite a newer block", async ({ page }, testInfo) => {
+  await press(page.getByTestId("view-switch"), testInfo.project.name);
+  await press(page.getByRole("menuitem", { name: "Week" }), testInfo.project.name);
+  await press(page.getByRole("button", { name: "Plan mode" }), testInfo.project.name);
+  const spec = block(page, "Spec review");
+  await spec.scrollIntoViewIfNeeded();
+  const at = await center(spec);
+  const column = await page.locator(".workband").first().evaluate((node) => node.getBoundingClientRect().width);
+  await uiDrag(page, testInfo.project.name, at.x, at.y, at.x + column, at.y);
+  await expect(page.getByTestId("plan-banner")).toContainText("1 move");
+  await page.reload();
+  const staged = JSON.parse(await page.evaluate(() => localStorage.getItem("tafo.v3.plan.v2") || "null"));
+  const before = await calendarState(page);
+  const specBefore = before.blocks.find((item) => item.title === "Spec review");
+  if (!specBefore) throw new Error("spec missing");
+  const shifted = new Date(Date.parse(specBefore.starts_at) + 15 * 60 * 1000).toISOString().replace(/\.\d{3}Z$/, "Z");
+  const shiftedEnd = new Date(Date.parse(specBefore.ends_at) + 15 * 60 * 1000).toISOString().replace(/\.\d{3}Z$/, "Z");
+  const changed = await page.evaluate(async (body) => {
+    const response = await fetch("/api/decisions/plan/commit", {
+      method: "POST",
+      credentials: "same-origin",
+      headers: { "Content-Type": "application/json", "X-TAFO-Actor": "human" },
+      body: JSON.stringify(body),
+    });
+    return { ok: response.ok, status: response.status, text: await response.text() };
+  }, {
+    confirmed: true,
+    moves: [{
+      block_id: specBefore.id,
+      expected_version: specBefore.version,
+      starts_at: shifted,
+      ends_at: shiftedEnd,
+      idempotency_key: "r2-server-change-spec",
+      title: "Spec review",
+    }],
+    approvals: [],
+  });
+  expect(changed.ok, changed.text).toBeTruthy();
+  await press(page.getByRole("button", { name: "Review", exact: true }), testInfo.project.name);
+  await press(page.getByRole("button", { name: /Approve all/ }), testInfo.project.name);
+  const toast = page.getByTestId("plan-toast");
+  await expect(toast).toContainText("Spec review changed");
+  const after = await calendarState(page);
+  const specRow = after.blocks.find((item) => item.id === specBefore.id);
+  expect(Date.parse(specRow?.starts_at || "")).toBe(Date.parse(shifted));
+  const draft = JSON.parse(await page.evaluate(() => localStorage.getItem("tafo.v3.plan.v2") || "null"));
+  expect(draft.moves.map((item: { id: string }) => item.id)).toEqual([specBefore.id]);
+  expect(draft.moves[0].version).toBe(staged.moves[0].version);
+  await expect(page.getByTestId("plan-conflict")).toContainText("Spec review changed");
 });
 
 test.describe("motion", () => {

@@ -521,16 +521,17 @@ body { margin: 0; background: #0a0b0d; }
 .v3[data-layout="frame"] .v3-tray { position: absolute; left: 0; right: 0; bottom: 0; z-index: 6; }
 .v3-tray .tray-grip {
   position: absolute;
-  top: -44px;
+  top: 0;
   left: 0;
   width: 100%;
   height: 44px;
   transform: none;
-  z-index: 7;
+  z-index: 1;
   background: transparent;
   touch-action: none;
 }
-.v3-tray .tray-grip::before {
+.v3-tray .tray-grip::before,
+.tray-sheet .tray-grip::before {
   content: "";
   position: absolute;
   left: 50%;
@@ -541,7 +542,18 @@ body { margin: 0; background: #0a0b0d; }
   background: #3a3e45;
   transform: translateX(-50%);
 }
-.tray-sheet .tray-grip { position: relative; top: 0; left: 0; transform: none; align-self: center; flex: none; }
+.tray-sheet .tray-grip {
+  position: relative;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 44px;
+  transform: none;
+  align-self: stretch;
+  flex: none;
+  touch-action: none;
+  background: transparent;
+}
 .unscheduled {
   display: flex;
   align-items: center;

@@ -341,7 +341,7 @@ def edit_proposal(
         if row["status"] != "pending":
             raise Problem(409, "not_pending", "Only a pending proposal can be edited.")
         if row["version"] != expected_version:
-            raise Problem(409, "version_conflict", "This proposal changed.", current_version=row["version"])
+            raise Problem(409, "version_conflict", "This proposal changed, so nothing was saved.", current_version=row["version"])
         kind = row["kind"]
         if kind == "task_change":
             normalized = normalize_task_change(conn, payload, editor="human")
@@ -375,7 +375,7 @@ def edit_proposal(
             ),
         )
         if cursor.rowcount != 1:
-            raise Problem(409, "version_conflict", "This proposal changed.")
+            raise Problem(409, "version_conflict", "This proposal changed, so nothing was saved.")
         write_audit(conn, actor=actor, action="proposal.edit", entity_type="proposal", entity_id=proposal_id, detail={})
         updated = get_proposal(conn, proposal_id)
         assert updated is not None
@@ -396,7 +396,7 @@ def reject_proposal(
     if row["status"] != "pending":
         raise Problem(409, "not_pending", "Only a pending proposal can be rejected.")
     if row["version"] != expected_version:
-        raise Problem(409, "version_conflict", "This proposal changed.", current_version=row["version"])
+        raise Problem(409, "version_conflict", "This proposal changed, so nothing was saved.", current_version=row["version"])
     now = utc_now_iso()
     cursor = conn.execute(
         """
@@ -407,7 +407,7 @@ def reject_proposal(
         (note[:500], now, now, proposal_id, expected_version),
     )
     if cursor.rowcount != 1:
-        raise Problem(409, "version_conflict", "This proposal changed.")
+        raise Problem(409, "version_conflict", "This proposal changed, so nothing was saved.")
     write_audit(conn, actor=actor, action="proposal.reject", entity_type="proposal", entity_id=proposal_id, detail={})
     updated = get_proposal(conn, proposal_id)
     assert updated is not None
@@ -458,7 +458,7 @@ def stage_approval(
     if row["status"] != "pending":
         raise Problem(409, "not_pending", "Only a pending proposal can be approved.")
     if row["version"] != expected_version:
-        raise Problem(409, "version_conflict", "This proposal changed.", current_version=row["version"])
+        raise Problem(409, "version_conflict", "This proposal changed, so nothing was saved.", current_version=row["version"])
     payload = effective_payload(row)
     if payload.get("touches_fixed") and not acknowledge_fixed_move:
         raise Problem(
@@ -496,7 +496,7 @@ def stage_approval(
                 "outbox_id": None if existing is None else existing["id"],
                 "outbox_status": None if existing is None else existing["status"],
             }
-        raise Problem(409, "version_conflict", "This proposal changed.")
+        raise Problem(409, "version_conflict", "This proposal changed, so nothing was saved.")
     outbox_id = None
     if row["kind"] == "task_change":
         _apply_task(conn, payload, acknowledge_task_drift, actor)
@@ -583,7 +583,7 @@ def _retime_proposal(
     if row["status"] != "pending":
         raise Problem(409, "not_pending", "Only a pending proposal can be edited.")
     if row["version"] != expected_version:
-        raise Problem(409, "version_conflict", "This proposal changed.", current_version=row["version"])
+        raise Problem(409, "version_conflict", "This proposal changed, so nothing was saved.", current_version=row["version"])
     current = effective_payload(row)
     raw = {
         "event_key": current.get("event_key"),
@@ -615,7 +615,7 @@ def _retime_proposal(
         ),
     )
     if cursor.rowcount != 1:
-        raise Problem(409, "version_conflict", "This proposal changed.")
+        raise Problem(409, "version_conflict", "This proposal changed, so nothing was saved.")
     write_audit(conn, actor="human", action="proposal.edit", entity_type="proposal", entity_id=proposal_id, detail={})
     return expected_version + 1
 
@@ -656,7 +656,7 @@ def commit_plan(
             (move["idempotency_key"],),
         ).fetchone()
         if existing is None and block["version"] != move["expected_version"]:
-            raise Problem(409, "version_conflict", "This block changed. Nothing was changed.", current_version=block["version"])
+            raise Problem(409, "version_conflict", f"{move['title']} changed, so nothing was saved.", current_version=block["version"])
         proposal_id, version, replay_insert = _insert_human_update(
             conn,
             explanation=explanation,

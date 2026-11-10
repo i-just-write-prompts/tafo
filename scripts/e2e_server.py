@@ -94,10 +94,40 @@ def main(argv: list[str] | None = None) -> int:
         print("Refusing to serve outside demo loopback settings.", file=sys.stderr)
         return 2
 
+    from tafo.calendar_adapter import AdapterResult
+
+    adapter = app.state.adapter
+    fail_keys: set[str] = set()
+    original_update = adapter.update_block
+
+    def update_block(event_key: str, payload: dict, known_google_id: str | None = None) -> AdapterResult:
+        if event_key in fail_keys:
+            fail_keys.discard(event_key)
+            return AdapterResult(
+                ok=False,
+                status="failed",
+                sync_state="not_synced",
+                google_event_id=None,
+                honest_label="Not synced. The calendar write failed.",
+                steps=[],
+                error="forced_failure",
+                mode="demo",
+            )
+        return original_update(event_key, payload, known_google_id)
+
+    adapter.update_block = update_block
+
     @app.post("/api/e2e/reset")
     def reset_fixture() -> JSONResponse:
+        fail_keys.clear()
         reset_database(db_path)
         return JSONResponse({"ok": True, "db": str(db_path)})
+
+    @app.post("/api/e2e/fail-writes")
+    def fail_writes(body: dict) -> dict:
+        keys = body.get("event_keys") or []
+        fail_keys.update(str(key) for key in keys)
+        return {"ok": True, "event_keys": sorted(fail_keys)}
 
     print(f"TAFO e2e demo server db={db_path} port={settings.port}", flush=True)
     uvicorn.run(app, host=settings.host, port=settings.port, log_level="info")

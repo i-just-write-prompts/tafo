@@ -1,6 +1,6 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { flushSync } from "react-dom";
-import { api, reportFailure } from "../api";
+import { ApiError, api, reportFailure } from "../api";
 import { PlanActions } from "../plan/actions";
 import { PlanMachine } from "../plan/planMachine";
 import { PlanBoard } from "../plan/selectors";
@@ -20,6 +20,7 @@ import {
   dayY,
   moveByPointer,
   nearMark,
+  paintedWeekSpan,
   weekBoxes,
   weekColumnWidth,
   weekY,
@@ -31,9 +32,11 @@ import {
   REVERT_TOAST,
   SYNC_DEMO,
   TIP_TEXT,
+  SAVE_UNCONFIRMED,
   approveLabel,
   approvedToast,
   bannerText,
+  partialPlanToast,
   clock,
   dayName,
   dayTitle,
@@ -49,7 +52,7 @@ import {
 import { COMMIT_PX, gestureDown, gestureMove, gestureUp, HOLD_MS, holdReady, type Gesture } from "./gesture";
 import { CheckGlyph, Chevron, MoreGlyph, PlanGlyph, SearchGlyph, Sparkle } from "./icons";
 import { ALL_SHOWN, buildEvents, showSummary, visibleEvents, withMove, type CalEvent, type ShowFilters } from "./model";
-import { approveDisabled, clearPlanStorage, confirmedPlanSave, enterPlan, exitPlan, includedIds, loadPlan, pendingProposalIds, proposalsOnDays, savePlan, stageMove, toggleSkip, type PlanSession, type StagedMove } from "./session";
+import { approveDisabled, clearPlanStorage, conflictingMoveIds, enterPlan, exitPlan, includedIds, loadPlan, pendingProposalIds, proposalsOnDays, retainMoves, savePlan, splitPlanSave, stageMove, toggleSkip, type PlanSession, type StagedMove } from "./session";
 import { wrapWeekTitle } from "./titles";
 import { showUndo, type UndoToast } from "./undo";
 import "./v3.css";
@@ -235,6 +238,15 @@ export function CalendarShell(props: Props) {
     plan.moves,
   );
   const included = includedIds(rangeIds, plan.skipped);
+  const conflictIds = conflictingMoveIds(
+    plan.moves,
+    props.blocks.map((block) => ({ id: block.id, version: block.version, starts_at: block.starts_at, ends_at: block.ends_at })),
+    props.proposals.map((proposal) => ({ id: proposal.id, ...proposalTimes(proposal), version: proposal.version })),
+  );
+  const conflictText = conflictIds
+    .map((id) => plan.moves.find((move) => move.id === id)?.title)
+    .filter((title): title is string => Boolean(title))
+    .join(", ");
   const unsavedFits = bannerText(plan.moves.length, rangeIds.length, true).length < 42;
   const banner = bannerText(plan.moves.length, rangeIds.length, unsavedFits && plan.moves.length > 0 && rangeIds.length === 0);
   const loose = PlanBoard.sidebarTasks(props.tasks, props.blocks, props.proposals, "unscheduled", "");
@@ -480,6 +492,21 @@ export function CalendarShell(props: Props) {
     }
   }
 
+  function stagedMove(server: CalEvent, to: { start: string; end: string }, dayKey: string, existing: StagedMove | undefined): StagedMove {
+    const sameTarget = existing?.to.start === to.start && existing.to.end === to.end;
+    return {
+      id: server.id,
+      kind: server.kind,
+      title: existing?.title || server.title,
+      version: existing?.version ?? server.version,
+      key: existing && sameTarget ? existing.key : PlanActions.gestureKey("plan"),
+      from: existing?.from ?? { start: server.start, end: server.end },
+      to,
+      fromDayKey: existing?.fromDayKey ?? server.dayKey,
+      dayKey,
+    };
+  }
+
   function stagePreview(eventId: string, preview: Preview) {
     const server = serverEvents.find((item) => item.id === eventId);
     if (!server) return;
@@ -488,14 +515,7 @@ export function CalendarShell(props: Props) {
     const start = atHour(preview.dayKey, preview.startHour, timeZone);
     const end = atHour(preview.dayKey, preview.startHour + duration, timeZone);
     if (!start || !end) return;
-    const move: StagedMove = {
-      id: eventId,
-      kind: server.kind,
-      from: existing?.from ?? { start: server.start, end: server.end },
-      to: { start, end },
-      fromDayKey: existing?.fromDayKey ?? server.dayKey,
-      dayKey: preview.dayKey,
-    };
+    const move = stagedMove(server, { start, end }, preview.dayKey, existing);
     setPlan((current) => stageMove(current, move));
   }
 
@@ -719,14 +739,12 @@ export function CalendarShell(props: Props) {
       const server = serverEvents.find((item) => item.id === event.id);
       if (!server) return;
       const existing = plan.moves.find((item) => item.id === event.id);
-      setPlan((current) => stageMove(current, {
-        id: event.id,
-        kind: server.kind,
-        from: existing?.from ?? { start: server.start, end: server.end },
-        to: { start: span.starts_at, end: span.ends_at },
-        fromDayKey: existing?.fromDayKey ?? server.dayKey,
-        dayKey: PlanTime.dayKey(new Date(span.starts_at), timeZone),
-      }));
+      setPlan((current) => stageMove(current, stagedMove(
+        server,
+        { start: span.starts_at, end: span.ends_at },
+        PlanTime.dayKey(new Date(span.starts_at), timeZone),
+        existing,
+      )));
       return;
     }
     if (event.fixed) {
@@ -755,29 +773,32 @@ export function CalendarShell(props: Props) {
       if (event.kind === "proposal") {
         approvals.push({
           proposal_id: event.id,
-          expected_version: event.version,
+          expected_version: move.version,
           starts_at: move.to.start,
           ends_at: move.to.end,
         });
       } else {
         moves.push({
           block_id: event.id,
-          expected_version: event.version,
+          expected_version: move.version,
           starts_at: move.to.start,
           ends_at: move.to.end,
-          idempotency_key: PlanActions.gestureKey("plan"),
-          title: event.title,
+          idempotency_key: move.key,
+          title: move.title || event.title,
           acknowledge_fixed_move: event.fixed,
         });
       }
     }
+    const missing = plan.moves.filter((move) => !serverEvents.some((event) => event.id === move.id));
     for (const id of included) {
       if (approvals.some((item) => item.proposal_id === id)) continue;
       const event = serverEvents.find((item) => item.id === id);
       if (!event) continue;
       approvals.push({ proposal_id: id, expected_version: event.version });
     }
-    const requestedMoves = plan.moves.map((move) => ({ id: move.id, kind: move.kind, to: move.to }));
+    const requestedMoves = plan.moves
+      .filter((move) => serverEvents.some((event) => event.id === move.id))
+      .map((move) => ({ id: move.id, kind: move.kind, to: move.to }));
     const extraProposalIds = approvals
       .map((item) => item.proposal_id)
       .filter((id) => !requestedMoves.some((move) => move.id === id));
@@ -787,29 +808,45 @@ export function CalendarShell(props: Props) {
         method: "POST",
         body: JSON.stringify({ confirmed: true, moves, approvals }),
       });
-      const [blockBody, proposalBody] = await Promise.all([
-        api<{ blocks: CalendarBlock[] }>("/api/calendar/blocks"),
-        api<{ proposals: Proposal[] }>("/api/hermes/proposals"),
-      ]);
-      const saved = confirmedPlanSave(
+      let blockBody: { blocks: CalendarBlock[] };
+      let proposalBody: { proposals: Proposal[] };
+      try {
+        [blockBody, proposalBody] = await Promise.all([
+          api<{ blocks: CalendarBlock[] }>("/api/calendar/blocks"),
+          api<{ proposals: Proposal[] }>("/api/hermes/proposals"),
+        ]);
+      } catch {
+        setOverlay(null);
+        pushToast(SAVE_UNCONFIRMED);
+        return;
+      }
+      const saved = splitPlanSave(
         requestedMoves,
         extraProposalIds,
         blockBody.blocks,
         proposalBody.proposals.map((proposal) => ({ id: proposal.id, ...proposalTimes(proposal) })),
       );
-      clearPlanStorage();
-      setPlan(exitPlan());
+      const unsavedIds = [...saved.unsavedMoveIds, ...missing.map((move) => move.id)];
+      const unsavedTitles = unsavedIds.map((id) => plan.moves.find((move) => move.id === id)?.title || "A move");
+      const kept = retainMoves(plan, unsavedIds);
+      if (kept.moves.length === 0) {
+        clearPlanStorage();
+        setPlan(exitPlan());
+      } else {
+        setPlan(kept);
+      }
       setOverrides({});
       setOverlay(null);
-      const message = saved.moves + saved.proposals === 0
-        ? "Couldn't save the plan. Nothing was changed."
-        : approvedToast(saved.moves, saved.proposals);
-      if (saved.moves + saved.proposals > 0) {
-        glowIds([...moves.map((item) => item.block_id), ...approvals.map((item) => item.proposal_id)]);
-      }
+      const savedCount = saved.savedMoveIds.length + saved.savedProposalIds.length;
+      const requestedCount = savedCount + unsavedIds.length;
+      const message = unsavedIds.length === 0
+        ? approvedToast(saved.savedMoveIds.length, saved.savedProposalIds.length)
+        : partialPlanToast(savedCount, requestedCount, unsavedTitles);
+      if (savedCount > 0) glowIds([...saved.savedMoveIds, ...saved.savedProposalIds]);
       pushToast(message);
       await propsRef.current.onRefresh();
     } catch (error) {
+      if (error instanceof ApiError && error.code === "version_conflict") setOverlay(null);
       await fail(error);
     } finally {
       setBusy(false);
@@ -879,6 +916,7 @@ export function CalendarShell(props: Props) {
           liveTitle={liveParts?.title ?? ""}
           liveWhen={liveParts?.when ?? ""}
           crossing={lifted && crossing}
+          conflict={conflictText ? `${conflictText} changed.` : ""}
           onExit={() => { setPlan(exitPlan()); setOverlay(null); }}
           onRevert={() => setOverlay({ kind: "revert" })}
           onReview={() => setOverlay({ kind: "review" })}
@@ -1083,6 +1121,7 @@ export function CalendarShell(props: Props) {
           onKeep={() => setOverlay(null)}
           disabled={approveDisabled(plan.moves.length, included.length) || busy}
           label={approveLabel(plan.moves.length, included.length)}
+          conflicts={conflictIds}
         />
       ) : null}
       {overlay.kind === "revert" ? (
@@ -1180,6 +1219,7 @@ function PlanBanner(props: {
   liveTitle: string;
   liveWhen: string;
   crossing: boolean;
+  conflict: string;
   onExit: () => void;
   onRevert: () => void;
   onReview: () => void;
@@ -1195,6 +1235,7 @@ function PlanBanner(props: {
             <span className="banner-when"> · {props.liveWhen}</span>
           </p>
         ) : <p>{props.text}</p>}
+        {props.conflict ? <p data-testid="plan-conflict">{props.conflict}</p> : null}
       </div>
       {props.live && props.crossing ? <span className="tag">Crosses work hours</span> : null}
       {!props.live && props.count === 0 ? <button type="button" className="ghost-btn" onClick={props.onExit}>Exit</button> : null}
@@ -1459,6 +1500,8 @@ function WeekCanvas(props: {
         const dx = lifted && props.drag ? (props.drag.dayIndex - originDay) * colW : 0;
         const dy = lifted && props.drag ? weekY(props.drag.startHour) - weekY(event.startHour) : 0;
         const moved = dx === 0 && dy === 0 ? box : { ...box, x: box.x + dx, y: box.y + dy };
+        const visibleIds = new Set(props.events.map((item) => item.id));
+        const painted = paintedWeekSpan(box, boxes, visibleIds, props.width);
         const lines = wrapWeekTitle(event.title, Math.max(8, box.w - 8), Math.max(1, Math.floor((box.h - 3) / 13)), measure);
         const motion = settleMotion(props.settle, event.id);
         const locked = props.lockId === event.id ? "settle-lock" : "";
@@ -1467,8 +1510,8 @@ function WeekCanvas(props: {
             key={event.id}
             type="button"
             className={lifted ? "block lifted" : props.openId === event.id ? "block open" : "block"}
-            data-narrow={moved.w < 28 ? "1" : "0"}
-            style={{ left: moved.x, top: moved.y, width: moved.w, height: moved.h }}
+            data-narrow={painted.w < 28 ? "1" : "0"}
+            style={{ left: painted.x + dx, top: moved.y, width: painted.w, height: moved.h }}
             aria-label={eventLabel(event)}
             data-testid={`block-${event.id}`}
             onPointerDown={(pointer) => props.onPointerDown(event, pointer)}
@@ -1650,6 +1693,7 @@ function ReviewSheet(props: {
   skipped: string[];
   timeZone: string;
   label: string;
+  conflicts: string[];
   disabled: boolean;
   onSkip: (id: string) => void;
   onApprove: () => void;
@@ -1676,6 +1720,7 @@ function ReviewSheet(props: {
               <small style={{ display: "block", color: "var(--t2)" }}>{dayName(from.dayKey)} {clock(from.startHour)} → {dayName(to.dayKey)} {clock(to.startHour)}</small>
             </span>
             {crosses ? <span className="tag">Crosses work hours</span> : null}
+            {props.conflicts.includes(move.id) ? <span className="tag">Changed</span> : null}
           </div>
         );
       })}
