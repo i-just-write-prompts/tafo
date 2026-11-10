@@ -1,4 +1,4 @@
-"""The Playwright server reloads the Slice 1 fixture and stays off the default database."""
+"""The Playwright server reloads the v3 week and stays off the default database."""
 
 import importlib.util
 import sqlite3
@@ -47,8 +47,9 @@ def test_reset_reloads_the_review_fixture(tmp_path):
     conn.row_factory = sqlite3.Row
     try:
         titles = {row["title"] for row in conn.execute("SELECT title FROM tasks")}
-        assert "Plan Saturday hike route" in titles
-        assert "Hold the ladder" in titles
+        assert "Call vendor" in titles
+        assert "Spec review" in titles
+        assert "Budget sheet" in titles
         assert "Outline the Northwind sample kickoff" not in titles
         pending = [
             row["idempotency_key"]
@@ -56,6 +57,6 @@ def test_reset_reloads_the_review_fixture(tmp_path):
                 "SELECT idempotency_key FROM proposals WHERE status = 'pending' ORDER BY idempotency_key"
             )
         ]
-        assert pending == ["agent-clean-journey", "agent-door-journey", "agent-herbs-journey"]
+        assert pending == ["v3-budget", "v3-closet"]
     finally:
         conn.close()

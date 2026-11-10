@@ -18,6 +18,7 @@ from tafo.calendar_adapter import OUTLOOK_GAP, CalendarAdapter, build_adapter
 from tafo.config import Settings, host_is_loopback
 from tafo.db import connect, read_session, session
 from tafo.decisions import (
+    commit_plan,
     create_proposal,
     edit_proposal,
     get_proposal,
@@ -31,6 +32,7 @@ from tafo.problems import Problem
 from tafo.schemas import (
     DecisionBody,
     EditBody,
+    PlanCommit,
     ProposalCreate,
     RestoreBody,
     SubtaskCreate,
@@ -469,6 +471,24 @@ def create_app(settings: Settings | None = None, adapter: CalendarAdapter | None
             "approval_required",
             "The Hermes inbox cannot approve, edit, or reject. A person decides at /api/decisions/{proposal_id}.",
         )
+
+    @app.post("/api/decisions/plan/commit", tags=["decisions"])
+    def post_plan_commit(body: PlanCommit, request: Request) -> dict:
+        """Apply every staged move and included proposal, or apply none of them."""
+        _require_decision(request)
+        _require_confirmed(body.confirmed)
+        with session(settings.db_path) as conn:
+            staged = commit_plan(
+                conn,
+                settings,
+                moves=[item.model_dump() for item in body.moves],
+                approvals=[item.model_dump() for item in body.approvals],
+                actor="human",
+            )
+        return {
+            "moves": [_finish(settings, adapter, item) for item in staged["moves"]],
+            "approvals": [_finish(settings, adapter, item) for item in staged["approvals"]],
+        }
 
     @app.post("/api/decisions/{proposal_id}/approve", tags=["decisions"])
     def post_approve(proposal_id: str, body: DecisionBody, request: Request) -> dict:

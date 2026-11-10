@@ -51,21 +51,22 @@ def fixture_module():
 
 
 def reseed_preview(settings: Settings) -> None:
-    """Replace the preview database with a fresh Slice 1 fixture."""
+    """Replace the preview database with the v3 fictional week."""
     if not settings.preview:
         raise RuntimeError("Refusing to reseed outside preview mode.")
     settings.validate()
-    module = fixture_module()
+    from tafo.v3_fixture import FixturePathError, V3Week
+
     db_path = settings.db_path.expanduser().resolve()
-    if module.JourneyFixture.forbidden(db_path):
-        raise module.FixturePathError(
+    if V3Week.forbidden(db_path):
+        raise FixturePathError(
             "Refusing to write the default database data/tafo.sqlite. "
             "Preview mode needs an ephemeral path."
         )
     db_path.parent.mkdir(parents=True, exist_ok=True)
     for extra in (db_path, Path(f"{db_path}-wal"), Path(f"{db_path}-shm")):
         extra.unlink(missing_ok=True)
-    module.JourneyFixture.load(db_path)
+    V3Week.load(db_path)
 
 
 def passwords_match(sent: str, expected: str) -> bool:

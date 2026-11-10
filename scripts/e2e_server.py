@@ -30,7 +30,7 @@ def fixture_module():
 
 
 def reset_database(db_path: Path) -> None:
-    """Replace db_path with a fresh Slice 1 review fixture."""
+    """Replace db_path with a fresh v3 week. The default database is refused."""
     module = fixture_module()
     resolved = db_path.expanduser().resolve()
     if module.JourneyFixture.forbidden(resolved):
@@ -41,7 +41,9 @@ def reset_database(db_path: Path) -> None:
     resolved.parent.mkdir(parents=True, exist_ok=True)
     for extra in (resolved, Path(f"{resolved}-wal"), Path(f"{resolved}-shm")):
         extra.unlink(missing_ok=True)
-    module.JourneyFixture.load(resolved)
+    from tafo.v3_fixture import V3Week
+
+    V3Week.load(resolved)
 
 
 def force_safe_env(db_path: Path) -> None:

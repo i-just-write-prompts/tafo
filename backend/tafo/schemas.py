@@ -86,3 +86,28 @@ class WeekRegenerate(BaseModel):
 class RestoreBody(BaseModel):
     confirm: str
     snapshot: dict
+
+
+class PlanMove(BaseModel):
+    block_id: str
+    expected_version: int
+    starts_at: str
+    ends_at: str
+    idempotency_key: str = Field(min_length=6, max_length=120)
+    title: str = Field(min_length=1, max_length=200)
+    acknowledge_fixed_move: bool = False
+
+
+class PlanApproval(BaseModel):
+    proposal_id: str
+    expected_version: int
+    starts_at: str | None = None
+    ends_at: str | None = None
+
+
+class PlanCommit(BaseModel):
+    """Stage every plan-mode move and included proposal in one transaction."""
+
+    confirmed: bool = False
+    moves: list[PlanMove] = Field(default_factory=list)
+    approvals: list[PlanApproval] = Field(default_factory=list)

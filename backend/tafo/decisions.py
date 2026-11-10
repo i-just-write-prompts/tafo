@@ -517,3 +517,187 @@ def stage_approval(
         "outbox_id": outbox_id,
         "outbox_status": "pending" if outbox_id else None,
     }
+
+
+def _insert_human_update(
+    conn: sqlite3.Connection,
+    *,
+    explanation: str,
+    idempotency_key: str,
+    payload: dict,
+    raw_payload: dict,
+) -> tuple[str, int, bool]:
+    """Insert one pending human calendar_update. Returns id, version, and whether it already existed."""
+    existing = conn.execute(
+        "SELECT * FROM proposals WHERE idempotency_key = ?",
+        (idempotency_key,),
+    ).fetchone()
+    if existing is not None:
+        if not _same_stored_body(existing, "calendar_update", explanation, payload, raw_payload):
+            raise Problem(409, "idempotency_conflict", "This idempotency_key was already used with a different body.")
+        return existing["id"], int(existing["version"]), True
+    proposal_id = new_id("prp")
+    now = utc_now_iso()
+    conn.execute(
+        """
+        INSERT INTO proposals (
+          id, source, source_kind, kind, status, explanation, payload_json, edited_payload_json,
+          target_task_id, target_block_id, availability_json, idempotency_key, version,
+          decision_note, decided_at, created_at, updated_at
+        ) VALUES (?, 'plan', 'human', 'calendar_update', 'pending', ?, ?, NULL, ?, ?, NULL, ?, 1, NULL, NULL, ?, ?)
+        """,
+        (
+            proposal_id,
+            explanation,
+            json.dumps(payload),
+            payload.get("task_id"),
+            payload.get("event_key"),
+            idempotency_key,
+            now,
+            now,
+        ),
+    )
+    write_audit(
+        conn,
+        actor="human",
+        action="proposal.create",
+        entity_type="proposal",
+        entity_id=proposal_id,
+        detail={"kind": "calendar_update"},
+    )
+    return proposal_id, 1, False
+
+
+def _retime_proposal(
+    conn: sqlite3.Connection,
+    settings: Settings,
+    proposal_id: str,
+    expected_version: int,
+    starts_at: str,
+    ends_at: str,
+) -> int:
+    """Move a pending proposal inside the open transaction. Returns the new version."""
+    row = conn.execute("SELECT * FROM proposals WHERE id = ?", (proposal_id,)).fetchone()
+    if row is None:
+        raise Problem(404, "not_found", "Proposal not found.")
+    if row["status"] != "pending":
+        raise Problem(409, "not_pending", "Only a pending proposal can be edited.")
+    if row["version"] != expected_version:
+        raise Problem(409, "version_conflict", "This proposal changed.", current_version=row["version"])
+    current = effective_payload(row)
+    raw = {
+        "event_key": current.get("event_key"),
+        "task_id": current.get("task_id"),
+        "domain": current.get("domain"),
+        "starts_at": starts_at,
+        "ends_at": ends_at,
+        "title": current.get("title"),
+        "allow_custom_title": current.get("allow_custom_title"),
+        "fixed": current.get("fixed"),
+        "invite_work_email": current.get("invite_work_email"),
+    }
+    normalized = normalize_calendar(conn, raw, editor="human", settings=settings, kind=row["kind"])
+    now = utc_now_iso()
+    cursor = conn.execute(
+        """
+        UPDATE proposals
+        SET edited_payload_json = ?, target_task_id = ?, target_block_id = ?,
+            version = version + 1, updated_at = ?
+        WHERE id = ? AND version = ? AND status = 'pending'
+        """,
+        (
+            json.dumps(normalized),
+            normalized.get("task_id"),
+            normalized.get("event_key"),
+            now,
+            proposal_id,
+            expected_version,
+        ),
+    )
+    if cursor.rowcount != 1:
+        raise Problem(409, "version_conflict", "This proposal changed.")
+    write_audit(conn, actor="human", action="proposal.edit", entity_type="proposal", entity_id=proposal_id, detail={})
+    return expected_version + 1
+
+
+def commit_plan(
+    conn: sqlite3.Connection,
+    settings: Settings,
+    *,
+    moves: list[dict],
+    approvals: list[dict],
+    actor: str,
+) -> dict:
+    """Approve every staged move and included proposal, or apply none of them.
+
+    The caller owns the transaction. Outbox rows are queued here and processed
+    after commit, the same way a single approval is.
+    """
+    if not moves and not approvals:
+        raise Problem(400, "empty_plan", "Nothing to approve.")
+    staged_moves = []
+    for move in moves:
+        block = get_block(conn, move["block_id"])
+        if block is None:
+            raise Problem(400, "unknown_block", "No app-owned block has that id. Nothing was changed.")
+        raw = {
+            "event_key": move["block_id"],
+            "task_id": block["task_id"],
+            "starts_at": move["starts_at"],
+            "ends_at": move["ends_at"],
+            "allow_custom_title": True,
+            "title": move["title"],
+            "timezone": settings.display_timezone,
+        }
+        payload = normalize_calendar(conn, raw, editor="human", settings=settings, kind="calendar_update")
+        explanation = f"Moved {move['title']} in plan mode."
+        existing = conn.execute(
+            "SELECT id FROM proposals WHERE idempotency_key = ?",
+            (move["idempotency_key"],),
+        ).fetchone()
+        if existing is None and block["version"] != move["expected_version"]:
+            raise Problem(409, "version_conflict", "This block changed. Nothing was changed.", current_version=block["version"])
+        proposal_id, version, replay_insert = _insert_human_update(
+            conn,
+            explanation=explanation,
+            idempotency_key=move["idempotency_key"],
+            payload=payload,
+            raw_payload=raw,
+        )
+        staged = stage_approval(
+            conn,
+            settings,
+            proposal_id,
+            expected_version=version,
+            note="",
+            acknowledge_fixed_move=bool(move.get("acknowledge_fixed_move")),
+            acknowledge_task_drift=False,
+            actor=actor,
+        )
+        staged_moves.append({**staged, "inserted_replay": replay_insert})
+
+    staged_approvals = []
+    for approval in approvals:
+        version = int(approval["expected_version"])
+        if approval.get("starts_at") and approval.get("ends_at"):
+            version = _retime_proposal(
+                conn,
+                settings,
+                approval["proposal_id"],
+                version,
+                approval["starts_at"],
+                approval["ends_at"],
+            )
+        staged_approvals.append(
+            stage_approval(
+                conn,
+                settings,
+                approval["proposal_id"],
+                expected_version=version,
+                note="",
+                acknowledge_fixed_move=False,
+                acknowledge_task_drift=False,
+                actor=actor,
+            )
+        )
+    return {"moves": staged_moves, "approvals": staged_approvals}

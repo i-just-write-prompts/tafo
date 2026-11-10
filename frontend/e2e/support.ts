@@ -7,9 +7,8 @@ import { expect, type APIRequestContext, type Locator, type Page, type TestInfo 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
 const shotRoot = path.join(repoRoot, "review-screenshots");
 
-/** Wednesday of the fixture week, 11:00 in America/Indianapolis. */
-const FIXTURE_NOW = Date.parse("2026-11-04T16:00:00Z");
-export const FIXTURE_RANGE = "Mon Nov 2 \u2013 Sun Nov 8";
+/** Tuesday 10 Nov 2026, 10:40 in America/Indianapolis. */
+export const FIXTURE_NOW = Date.parse("2026-11-10T15:40:00Z");
 
 export async function reseed(request: APIRequestContext): Promise<void> {
   const response = await request.post("/api/e2e/reset");
@@ -19,7 +18,7 @@ export async function reseed(request: APIRequestContext): Promise<void> {
   expect(body.db ?? "").not.toMatch(/data[\\/]tafo\.sqlite$/);
 }
 
-export async function openFixtureWeek(page: Page): Promise<void> {
+export async function openDay(page: Page): Promise<void> {
   await page.addInitScript((fixed: number) => {
     const RealDate = Date;
     const started = RealDate.now();
@@ -34,13 +33,12 @@ export async function openFixtureWeek(page: Page): Promise<void> {
     ShiftedDate.now = shiftedNow;
     ShiftedDate.parse = RealDate.parse;
     ShiftedDate.UTC = RealDate.UTC;
-    // The plan anchors the week on `new Date()` once, at first render.
     window.Date = ShiftedDate as DateConstructor;
   }, FIXTURE_NOW);
   await page.goto("/");
-  await expect(page.getByRole("heading", { name: "TAFO" })).toBeVisible();
-  await expect(page.getByText(FIXTURE_RANGE)).toBeVisible();
-  await expect(page.getByTestId("cal-grid")).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Tue, Nov 10" })).toBeVisible();
+  await expect(page.getByTestId("view-switch")).toContainText("Day");
+  await expect(page.getByTestId("day-grid")).toBeVisible();
 }
 
 export async function press(locator: Locator, projectName: string): Promise<void> {
@@ -58,44 +56,21 @@ export async function shot(page: Page, testInfo: TestInfo, label: string): Promi
   await testInfo.attach(`${testInfo.project.name}-${slug}`, { path: file, contentType: "image/png" });
 }
 
-export function proposal(page: Page, title: string): Locator {
-  return page.locator("[data-testid^='proposed-']").filter({ hasText: title });
+export function block(page: Page, title: string): Locator {
+  return page.getByRole("button", { name: new RegExp(title) }).first();
 }
 
-export function blockFace(page: Page, title: string): Locator {
-  const escaped = title.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  return page.getByRole("button", { name: new RegExp(`^${escaped},`) });
-}
-
-export async function dragBetween(page: Page, fromX: number, fromY: number, toX: number, toY: number): Promise<void> {
+/** Press-and-hold, then move. The hold is what lifts a block. */
+export async function dragHold(page: Page, fromX: number, fromY: number, toX: number, toY: number): Promise<void> {
   await page.mouse.move(fromX, fromY);
   await page.mouse.down();
-  try {
-    await page.mouse.move(toX, toY, { steps: 20 });
-  } finally {
-    await page.mouse.up();
-  }
+  await page.waitForTimeout(420);
+  await page.mouse.move(toX, toY, { steps: 16 });
+  await page.mouse.up();
 }
 
-export async function columnDropPoint(page: Page, dayKey: string): Promise<{ x: number; y: number }> {
-  const column = page.getByTestId(`cal-column-${dayKey}`);
-  await column.scrollIntoViewIfNeeded();
-  const scrollBox = await page.locator(".cal-scroll").boundingBox();
-  const colBox = await column.boundingBox();
-  if (!scrollBox || !colBox) throw new Error(`missing column geometry for ${dayKey}`);
-  const x = colBox.x + colBox.width / 2;
-  const top = Math.max(scrollBox.y + 8, colBox.y);
-  const bottom = Math.min(scrollBox.y + scrollBox.height - 8, colBox.y + colBox.height);
-  const y = top + Math.max(24, (bottom - top) / 2);
-  return { x, y };
-}
-
-export async function placeBlockInView(page: Page, block: Locator): Promise<void> {
-  await block.evaluate((element) => {
-    const scroller = element.closest(".cal-scroll");
-    if (!(scroller instanceof HTMLElement)) return;
-    const blockBox = element.getBoundingClientRect();
-    const view = scroller.getBoundingClientRect();
-    scroller.scrollTop += blockBox.top - view.top - 12;
-  });
+export async function center(locator: Locator): Promise<{ x: number; y: number }> {
+  const box = await locator.boundingBox();
+  if (!box) throw new Error("missing box");
+  return { x: box.x + box.width / 2, y: box.y + Math.min(box.height / 2, 18) };
 }

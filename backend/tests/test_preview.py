@@ -1,4 +1,4 @@
-"""Preview mode is demo-only, password-gated, and reloads the Slice 1 fixture on startup."""
+"""Preview mode is demo-only, password-gated, and reloads the v3 week on startup."""
 
 import base64
 import sqlite3
@@ -88,8 +88,8 @@ def test_preview_reloads_the_slice1_fixture(tmp_path):
     conn.row_factory = sqlite3.Row
     try:
         titles = {row["title"] for row in conn.execute("SELECT title FROM tasks")}
-        assert "Plan Saturday hike route" in titles
-        assert "Hold the ladder" in titles
+        assert "Call vendor" in titles
+        assert "Spec review" in titles
         assert "Outline the Northwind sample kickoff" not in titles
     finally:
         conn.close()
@@ -129,7 +129,7 @@ def test_preview_serves_the_ui_and_resets_on_startup(tmp_path):
     with TestClient(restarted) as client:
         titles = {task["title"] for task in client.get("/api/tasks", headers=headers).json()["tasks"]}
         assert "Temporary preview task" not in titles
-        assert "Plan Saturday hike route" in titles
+        assert "Call vendor" in titles
         assert client.get("/", headers=headers).status_code == 200
 
 
@@ -142,7 +142,7 @@ def test_preview_password_gate(tmp_path):
         missing = client.get("/")
         assert missing.status_code == 401
         assert missing.headers["www-authenticate"] == 'Basic realm="TAFO preview"'
-        assert "Plan Saturday hike route" not in missing.text
+        assert "Call vendor" not in missing.text
         wrong = client.get("/api/meta", headers=basic("nope"))
         assert wrong.status_code == 401
         assert wrong.headers["www-authenticate"].startswith("Basic ")
@@ -162,7 +162,7 @@ def test_preview_without_a_password_fails_closed(tmp_path):
         denied = client.get("/api/meta")
         assert denied.status_code == 503
         assert "www-authenticate" not in denied.headers
-        assert "Plan Saturday hike route" not in denied.text
+        assert "Call vendor" not in denied.text
         assert client.get("/", headers=basic("anything")).status_code == 503
         health = client.get("/api/health")
         assert health.status_code == 200
