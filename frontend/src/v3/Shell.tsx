@@ -187,6 +187,13 @@ export function CalendarShell(props: Props) {
   const [width, setWidth] = useState(390);
   const [frame, setFrame] = useState(false);
   const [busy, setBusy] = useState(false);
+  const busyRef = useRef(false);
+  const quickInFlight = useRef(false);
+  const pendingQuick = useRef<{ event: CalEvent; start: string; end: string; acknowledgeFixed: boolean } | null>(null);
+  function setBusyFlag(value: boolean) {
+    busyRef.current = value;
+    setBusy(value);
+  }
   const gridRef = useRef<HTMLDivElement>(null);
   const originRef = useRef<DragOrigin | null>(null);
   const gestureRef = useRef<Gesture>({ phase: "idle" });
@@ -445,7 +452,7 @@ export function CalendarShell(props: Props) {
   }
 
   async function retryRefused(outboxId: string, title: string, start: string, end: string) {
-    setBusy(true);
+    setBusyFlag(true);
     try {
       const result = await api<{ operation: { status?: string } | null; block: CalendarBlock | null }>(
         `/api/calendar/outbox/${outboxId}/retry`,
@@ -465,7 +472,7 @@ export function CalendarShell(props: Props) {
     } catch (error) {
       await fail(error);
     } finally {
-      setBusy(false);
+      setBusyFlag(false);
     }
   }
 
@@ -483,10 +490,18 @@ export function CalendarShell(props: Props) {
   }
 
   async function saveQuick(event: CalEvent, startIso: string, endIso: string, acknowledgeFixed = false) {
-    if (busy) return;
+    if (busyRef.current) {
+      // Keep a second quick drag. The Approve-all click shield is a separate guard and stays.
+      if (quickInFlight.current) {
+        pendingQuick.current = { event, start: startIso, end: endIso, acknowledgeFixed };
+        setOverrides((current) => ({ ...current, [event.id]: { start: startIso, end: endIso } }));
+      }
+      return;
+    }
+    quickInFlight.current = true;
     const original = { start: event.start, end: event.end };
     setOverrides((current) => ({ ...current, [event.id]: { start: startIso, end: endIso } }));
-    setBusy(true);
+    setBusyFlag(true);
     try {
       if (event.kind === "proposal") {
         const proposal = propsRef.current.proposals.find((item) => item.id === event.id);
@@ -555,7 +570,11 @@ export function CalendarShell(props: Props) {
     } catch (error) {
       await fail(error);
     } finally {
-      setBusy(false);
+      quickInFlight.current = false;
+      const next = pendingQuick.current;
+      pendingQuick.current = null;
+      setBusyFlag(false);
+      if (next) void saveQuick(next.event, next.start, next.end, next.acknowledgeFixed);
     }
   }
 
@@ -902,7 +921,7 @@ export function CalendarShell(props: Props) {
       pushToast(conflictText ? `${conflictText} changed, so nothing was saved.` : "Nothing to approve.");
       return;
     }
-    setBusy(true);
+    setBusyFlag(true);
     try {
       const committed = await api<{
         moves: Array<{ saved: boolean; item_id: string; item_title: string }>;
@@ -946,14 +965,14 @@ export function CalendarShell(props: Props) {
       await fail(error);
     } finally {
       approving.current = false;
-      setBusy(false);
+      setBusyFlag(false);
     }
   }
 
   async function decide(event: CalEvent, action: "approve" | "deny") {
     const proposal = props.proposals.find((item) => item.id === event.id);
     if (!proposal || busy) return;
-    setBusy(true);
+    setBusyFlag(true);
     try {
       if (action === "deny") {
         await PlanActions.reject(proposal, "Denied");
@@ -968,7 +987,7 @@ export function CalendarShell(props: Props) {
     } catch (error) {
       await fail(error);
     } finally {
-      setBusy(false);
+      setBusyFlag(false);
     }
   }
 
