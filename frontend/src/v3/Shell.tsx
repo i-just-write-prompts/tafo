@@ -22,7 +22,6 @@ import {
   nearMark,
   weekBoxes,
   weekColumnWidth,
-  weekTitleWidth,
   weekY,
   type DayBox,
   type TapBox,
@@ -50,7 +49,7 @@ import {
 import { COMMIT_PX, gestureDown, gestureMove, gestureUp, HOLD_MS, holdReady, type Gesture } from "./gesture";
 import { CheckGlyph, Chevron, MoreGlyph, PlanGlyph, SearchGlyph, Sparkle } from "./icons";
 import { ALL_SHOWN, buildEvents, showSummary, visibleEvents, withMove, type CalEvent, type ShowFilters } from "./model";
-import { approveDisabled, enterPlan, exitPlan, includedIds, loadPlan, pendingProposalIds, proposalsOnDays, savePlan, stageMove, toggleSkip, type PlanSession, type StagedMove } from "./session";
+import { approveDisabled, clearPlanStorage, confirmedPlanSave, enterPlan, exitPlan, includedIds, loadPlan, pendingProposalIds, proposalsOnDays, savePlan, stageMove, toggleSkip, type PlanSession, type StagedMove } from "./session";
 import { wrapWeekTitle } from "./titles";
 import { showUndo, type UndoToast } from "./undo";
 import "./v3.css";
@@ -96,6 +95,7 @@ interface SettleBox {
 interface Settle {
   id: string;
   park: SettleBox;
+  rest?: SettleBox;
   live: boolean;
 }
 
@@ -347,7 +347,15 @@ export function CalendarShell(props: Props) {
     let second = 0;
     const first = requestAnimationFrame(() => {
       second = requestAnimationFrame(() => {
-        setSettle((current) => (current && !current.live ? { ...current, live: true } : current));
+        setSettle((current) => {
+          if (!current || current.live) return current;
+          const button = gridRef.current?.querySelector(`[data-testid="block-${current.id}"]`);
+          const week = gridRef.current?.dataset.testid === "week-grid";
+          const rest = week && button instanceof HTMLElement
+            ? { left: 0, top: 0, width: button.clientWidth, height: button.clientHeight }
+            : undefined;
+          return { ...current, live: true, rest };
+        });
       });
     });
     return () => {
@@ -657,20 +665,51 @@ export function CalendarShell(props: Props) {
 
   function onTrayPointer(pointer: React.PointerEvent<HTMLButtonElement>) {
     if (pointer.button !== 0) return;
+    const found = document.querySelector(".tray-sheet");
+    if (!(found instanceof HTMLElement)) return;
+    const sheet = found;
+    const height = sheet.getBoundingClientRect().height || 1;
     const startY = pointer.clientY;
     const pointerId = pointer.pointerId;
     const opened = trayOpen;
-    function up(native: PointerEvent) {
-      if (native.pointerId !== pointerId) return;
-      window.removeEventListener("pointerup", up);
-      window.removeEventListener("pointercancel", up);
-      const dy = native.clientY - startY;
-      if (dy <= -24) setTrayOpen(true);
-      else if (dy >= 24) setTrayOpen(false);
-      else if (Math.abs(dy) < 8) setTrayOpen(!opened);
+    const origin = opened ? 0 : height;
+    let lastY = startY;
+    let lastT = performance.now();
+    let velocity = 0;
+    sheet.style.transition = "none";
+    function place(y: number) {
+      const offset = Math.min(height, Math.max(0, origin + (y - startY)));
+      sheet.style.transform = `translateY(${offset}px)`;
     }
-    window.addEventListener("pointerup", up);
-    window.addEventListener("pointercancel", up);
+    function move(native: PointerEvent) {
+      if (native.pointerId !== pointerId) return;
+      const now = performance.now();
+      const dt = now - lastT;
+      if (dt > 0) velocity = (native.clientY - lastY) / dt;
+      lastY = native.clientY;
+      lastT = now;
+      place(native.clientY);
+    }
+    function finish(native: PointerEvent) {
+      if (native.pointerId !== pointerId) return;
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", finish);
+      window.removeEventListener("pointercancel", finish);
+      const dy = native.clientY - startY;
+      const offset = Math.min(height, Math.max(0, origin + dy));
+      let open = opened;
+      if (velocity < -0.4 || dy <= -24) open = true;
+      else if (velocity > 0.4 || dy >= 24) open = false;
+      else if (Math.abs(dy) < 8) open = !opened;
+      else open = offset < height * 0.5;
+      sheet.style.transition = "";
+      sheet.style.transform = "";
+      setTrayOpen(open);
+    }
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", finish);
+    window.addEventListener("pointercancel", finish);
+    place(startY);
   }
 
   function nudge(event: CalEvent, minutes: number, days: number) {
@@ -738,18 +777,36 @@ export function CalendarShell(props: Props) {
       if (!event) continue;
       approvals.push({ proposal_id: id, expected_version: event.version });
     }
+    const requestedMoves = plan.moves.map((move) => ({ id: move.id, kind: move.kind, to: move.to }));
+    const extraProposalIds = approvals
+      .map((item) => item.proposal_id)
+      .filter((id) => !requestedMoves.some((move) => move.id === id));
     setBusy(true);
     try {
       await api("/api/decisions/plan/commit", {
         method: "POST",
         body: JSON.stringify({ confirmed: true, moves, approvals }),
       });
-      const moved = new Set(plan.moves.map((item) => item.id));
-      const extraProposals = approvals.filter((item) => !moved.has(item.proposal_id)).length;
-      const message = approvedToast(plan.moves.length, extraProposals);
+      const [blockBody, proposalBody] = await Promise.all([
+        api<{ blocks: CalendarBlock[] }>("/api/calendar/blocks"),
+        api<{ proposals: Proposal[] }>("/api/hermes/proposals"),
+      ]);
+      const saved = confirmedPlanSave(
+        requestedMoves,
+        extraProposalIds,
+        blockBody.blocks,
+        proposalBody.proposals.map((proposal) => ({ id: proposal.id, ...proposalTimes(proposal) })),
+      );
+      clearPlanStorage();
       setPlan(exitPlan());
+      setOverrides({});
       setOverlay(null);
-      glowIds([...moves.map((item) => item.block_id), ...approvals.map((item) => item.proposal_id)]);
+      const message = saved.moves + saved.proposals === 0
+        ? "Couldn't save the plan. Nothing was changed."
+        : approvedToast(saved.moves, saved.proposals);
+      if (saved.moves + saved.proposals > 0) {
+        glowIds([...moves.map((item) => item.block_id), ...approvals.map((item) => item.proposal_id)]);
+      }
       pushToast(message);
       await propsRef.current.onRefresh();
     } catch (error) {
@@ -917,6 +974,7 @@ export function CalendarShell(props: Props) {
           ) : (
             <WeekCanvas
               events={weekEvents}
+              layoutEvents={baseEvents.filter((event) => weekKeys.includes(event.dayKey))}
               weekKeys={weekKeys}
               width={Math.max(width, 320)}
               nowHour={weekKeys.includes(todayKey) ? nowHour : null}
@@ -939,6 +997,7 @@ export function CalendarShell(props: Props) {
           )}
         </div>
       </div>
+      {trayOpen ? <button type="button" className="tray-scrim" data-testid="tray-scrim" aria-label="Close tray" onClick={() => setTrayOpen(false)} /> : null}
       <div className="tray-sheet" data-open={trayOpen ? "1" : "0"} data-testid="tray-sheet" role="dialog" aria-label="Calendar tray" aria-hidden={trayOpen ? undefined : true}>
         <button type="button" className="tray-grip" data-testid="tray-sheet-grip" aria-label="Calendar tray" onPointerDown={onTrayPointer} />
         <div className="tray-sheet-body">
@@ -948,7 +1007,7 @@ export function CalendarShell(props: Props) {
             <div key={task.id} className="row">{task.title}</div>
           ))}
           <h2>{syncText}</h2>
-          <p className="sub">{props.meta?.sync_label}</p>
+          <p className="sub">{(props.meta?.sync_label || "").replaceAll("NOT synced", "Not synced")}</p>
         </div>
       </div>
       <div className="v3-tray">
@@ -1016,7 +1075,7 @@ export function CalendarShell(props: Props) {
         <ReviewSheet
           moves={plan.moves}
           events={serverEvents}
-          proposals={serverEvents.filter((event) => event.state === "proposed" && (mode === "day" ? event.dayKey === anchor : weekKeys.includes(event.dayKey)))}
+          proposals={serverEvents.filter((event) => event.state === "proposed" && !plan.moves.some((move) => move.id === event.id) && (mode === "day" ? event.dayKey === anchor : weekKeys.includes(event.dayKey)))}
           skipped={plan.skipped}
           timeZone={timeZone}
           onSkip={(id) => setPlan((current) => toggleSkip(current, id))}
@@ -1149,21 +1208,40 @@ function PlanBanner(props: {
   );
 }
 
+const WEEK_FACE_REST: React.CSSProperties = {
+  left: 0,
+  top: 0,
+  right: 0,
+  bottom: 0,
+  width: "auto",
+  height: "auto",
+};
+
 function settleMotion(settle: Settle | null, id: string): { className: string; style: React.CSSProperties } {
-  if (!settle || settle.id !== id || settle.live) {
-    return { className: settle?.id === id && settle.live ? "settling live" : "", style: {} };
-  }
+  if (!settle || settle.id !== id) return { className: "", style: {} };
+  const box = settle.live ? settle.rest : settle.park;
+  if (!box) return { className: "settling live", style: {} };
   return {
-    className: "settling",
+    className: settle.live ? "settling live" : "settling",
     style: {
       position: "absolute",
-      left: settle.park.left,
-      top: settle.park.top,
-      width: settle.park.width,
-      height: settle.park.height,
+      left: box.left,
+      top: box.top,
+      width: box.width,
+      height: box.height,
       right: "auto",
       bottom: "auto",
     },
+  };
+}
+
+function proposalTimes(proposal: Proposal): { status: string; starts_at?: string; ends_at?: string } {
+  const edited = proposal.edited_payload;
+  const source = edited && typeof edited.starts_at === "string" ? edited : proposal.payload;
+  return {
+    status: proposal.status,
+    starts_at: typeof source.starts_at === "string" ? source.starts_at : undefined,
+    ends_at: typeof source.ends_at === "string" ? source.ends_at : undefined,
   };
 }
 
@@ -1305,13 +1383,13 @@ function EventButton(props: {
           top: box.y - tap.y,
           width: box.w,
           height: box.h,
-          background: event.state === "approved" ? fill(event.domain) : undefined,
+          backgroundColor: event.state === "proposed" ? "color-mix(in srgb, currentColor 12%, transparent)" : event.state === "done" ? "#16181b" : fill(event.domain),
           color: event.state === "proposed" ? line(event.domain) : event.state === "done" ? undefined : text(event.domain),
           ...motion.style,
         }}
       >
-        {event.state === "approved" ? <i className="bar" style={{ background: line(event.domain) }} /> : null}
-        {event.state === "proposed" ? <i className="dash" /> : null}
+        {event.state === "approved" || event.state === "done" ? <i className="bar" style={{ background: line(event.domain) }} /> : null}
+        <i className="dash" data-on={event.state === "proposed" ? "1" : "0"} />
         <span className="body">
           {event.state === "done" ? <span className="done-check"><CheckGlyph /></span> : null}
           <strong>{event.title}</strong>
@@ -1331,6 +1409,7 @@ function EventButton(props: {
 
 function WeekCanvas(props: {
   events: CalEvent[];
+  layoutEvents: CalEvent[];
   weekKeys: string[];
   width: number;
   nowHour: number | null;
@@ -1345,7 +1424,7 @@ function WeekCanvas(props: {
   onOpen: (event: CalEvent) => void;
 }) {
   const colW = weekColumnWidth(props.width);
-  const timed = props.events.map((event) => ({
+  const timed = props.layoutEvents.map((event) => ({
     id: event.id,
     day: Math.max(0, props.weekKeys.indexOf(event.dayKey)),
     start: event.startHour,
@@ -1380,7 +1459,7 @@ function WeekCanvas(props: {
         const dx = lifted && props.drag ? (props.drag.dayIndex - originDay) * colW : 0;
         const dy = lifted && props.drag ? weekY(props.drag.startHour) - weekY(event.startHour) : 0;
         const moved = dx === 0 && dy === 0 ? box : { ...box, x: box.x + dx, y: box.y + dy };
-        const lines = wrapWeekTitle(event.title, weekTitleWidth(props.width), Math.max(1, Math.floor((box.h - 3) / 13)), measure);
+        const lines = wrapWeekTitle(event.title, Math.max(8, box.w - 8), Math.max(1, Math.floor((box.h - 3) / 13)), measure);
         const motion = settleMotion(props.settle, event.id);
         const locked = props.lockId === event.id ? "settle-lock" : "";
         return (
@@ -1388,6 +1467,7 @@ function WeekCanvas(props: {
             key={event.id}
             type="button"
             className={lifted ? "block lifted" : props.openId === event.id ? "block open" : "block"}
+            data-narrow={moved.w < 28 ? "1" : "0"}
             style={{ left: moved.x, top: moved.y, width: moved.w, height: moved.h }}
             aria-label={eventLabel(event)}
             data-testid={`block-${event.id}`}
@@ -1399,15 +1479,15 @@ function WeekCanvas(props: {
             <span
               className={`face ${event.state} ${props.glow.includes(event.id) ? "glow" : ""} ${props.openId === event.id ? "open" : ""} ${locked} ${motion.className}`}
               style={{
-                inset: 0,
-                background: event.state === "approved" ? fill(event.domain) : undefined,
+                ...WEEK_FACE_REST,
+                backgroundColor: event.state === "proposed" ? "color-mix(in srgb, currentColor 12%, transparent)" : fill(event.domain),
                 color: event.state === "proposed" ? line(event.domain) : text(event.domain),
                 ...motion.style,
               }}
             >
               {event.state === "approved" ? <i className="bar" style={{ background: line(event.domain) }} /> : null}
-              {event.state === "proposed" ? <i className="dash" /> : null}
-              <span className="body" style={{ inset: "2px 1px 2px 4px", justifyContent: "flex-start" }}>
+              <i className="dash" data-on={event.state === "proposed" ? "1" : "0"} />
+              <span className="body" style={{ top: 2, right: 1, bottom: 2, left: 4, justifyContent: "flex-start" }}>
                 {lines.lines.map((lineText) => (
                   <strong key={lineText} className="week-title">{lineText}</strong>
                 ))}

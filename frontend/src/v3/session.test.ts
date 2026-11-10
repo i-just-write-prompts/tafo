@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 
-import { approveDisabled, enterPlan, exitPlan, includedIds, loadPlan, pendingProposalIds, proposalsOnDays, revertMoves, savePlan, stageMove, toggleSkip } from "./session";
+import { approveDisabled, confirmedPlanSave, enterPlan, exitPlan, includedIds, loadPlan, pendingProposalIds, proposalsOnDays, revertMoves, savePlan, stageMove, toggleSkip } from "./session";
 
 describe("plan session", () => {
   it("starts empty and entering does not invent moves", () => {
@@ -97,5 +97,32 @@ describe("plan session", () => {
     expect(loadPlan().active).toBe(false);
     expect(loadPlan().moves).toEqual([]);
     vi.unstubAllGlobals();
+  });
+
+  it("counts only the moves and proposals the server read shows", () => {
+    const moves = [
+      { id: "spec", kind: "block" as const, to: { start: "2026-11-11T14:30:00Z", end: "2026-11-11T16:00:00Z" } },
+      { id: "budget", kind: "proposal" as const, to: { start: "2026-11-10T20:15:00Z", end: "2026-11-10T21:45:00Z" } },
+    ];
+    const saved = confirmedPlanSave(
+      moves,
+      ["closet"],
+      [{ id: "spec", starts_at: "2026-11-10T14:30:00.000Z", ends_at: "2026-11-10T16:00:00Z" }],
+      [
+        { id: "budget", status: "pending", starts_at: "2026-11-10T19:00:00Z", ends_at: "2026-11-10T20:30:00Z" },
+        { id: "closet", status: "pending" },
+      ],
+    );
+    expect(saved).toEqual({ moves: 0, proposals: 0 });
+    const kept = confirmedPlanSave(
+      moves,
+      ["closet"],
+      [{ id: "spec", starts_at: "2026-11-11T14:30:00Z", ends_at: "2026-11-11T16:00:00Z" }],
+      [
+        { id: "budget", status: "approved", starts_at: "2026-11-10T20:15:00Z", ends_at: "2026-11-10T21:45:00Z" },
+        { id: "closet", status: "approved" },
+      ],
+    );
+    expect(kept).toEqual({ moves: 2, proposals: 1 });
   });
 });
