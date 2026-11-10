@@ -70,7 +70,13 @@ test("PR1 a refused quick drag stays visible with Retry", async ({ page }, testI
   const taskId = budget.payload.task_id || "";
   await armWriteFailure(page, [], 1);
   await dragTitle(page, testInfo.project.name, "Budget sheet", 60);
-  const landed: { start: string; end: string } = { start: "", end: "" };
+  await page.locator("[data-testid=plan-toast]").waitFor();
+  const edited = await readCalendar(page);
+  const row = edited.proposals.find((item) => item.id === budget.id);
+  const start = row?.edited_payload?.starts_at || row?.payload.starts_at || "";
+  const end = row?.edited_payload?.ends_at || row?.payload.ends_at || "";
+  expect(start, "the drag edited the proposal").not.toBe("");
+  expect(scheduledFor(edited.blocks, taskId), "failed create inserts no block").toBeUndefined();
   await checkSaveClaim(page, {
     case: "failure-then-retry",
     toast: page.getByTestId("plan-toast"),
@@ -78,11 +84,7 @@ test("PR1 a refused quick drag stays visible with Retry", async ({ page }, testI
     excludes: ["didn't move", "→"],
     proposals: [{ id: budget.id, status: "approved" }],
     retry: async () => {
-      const edited = await readCalendar(page);
-      const row = edited.proposals.find((item) => item.id === budget.id);
-      landed.start = row?.edited_payload?.starts_at || row?.payload.starts_at || "";
-      landed.end = row?.edited_payload?.ends_at || row?.payload.ends_at || "";
-      expect(scheduledFor(edited.blocks, taskId), "failed create inserts no block").toBeUndefined();
+      await expect(page.locator("[data-testid=plan-toast]").getByRole("button", { name: "Retry" })).toBeVisible();
       await expect(page.locator("[data-testid=plan-toast]")).toHaveCount(0, { timeout: 6000 });
       const marker = page.getByRole("button", { name: /Budget sheet/ });
       await expect(marker).toHaveAttribute("aria-label", /Not on calendar/);
@@ -93,7 +95,7 @@ test("PR1 a refused quick drag stays visible with Retry", async ({ page }, testI
       toast: page.getByTestId("plan-toast"),
       includes: ["→"],
       proposals: [{ id: budget.id, status: "approved" }],
-      blocks: [{ taskTitle: "Budget sheet", starts_at: landed.start, ends_at: landed.end }],
+      blocks: [{ taskTitle: "Budget sheet", starts_at: start, ends_at: end }],
     },
   });
 });
@@ -116,6 +118,7 @@ test("decide a refused Approve stays visible with Retry", async ({ page }, testI
     excludes: ["didn't move", "→", "Approved Budget"],
     proposals: [{ id: budget.id, status: "approved" }],
     retry: async () => {
+      await expect(page.locator("[data-testid=plan-toast]").getByRole("button", { name: "Retry" })).toBeVisible();
       await expect(page.locator("[data-testid=plan-toast]")).toHaveCount(0, { timeout: 6000 });
       const marker = page.getByRole("button", { name: /Budget sheet/ });
       await expect(marker).toHaveAttribute("aria-label", /Not on calendar/);
@@ -323,7 +326,7 @@ test("approve-after-conflict toast fits on one line with changed visible", async
   });
   expect(changed.ok, changed.text).toBeTruthy();
   await page.reload();
-  await expect(page.getByRole("heading", { name: "Tue, Nov 10" })).toBeVisible();
+  await expect(page.getByTestId("plan-banner")).toBeVisible();
   await press(page.getByRole("button", { name: "Review", exact: true }), testInfo.project.name);
   await expect(page.getByTestId("changed-tag")).toContainText("Spec review");
   await press(page.getByTestId("approve-all"), testInfo.project.name);
@@ -392,17 +395,17 @@ async function doubleTapApprove(page: Page, project: string, gap: number) {
   page.on("request", (request) => {
     if (request.method() === "POST" && request.url().includes("/api/decisions/plan/commit")) commits += 1;
   });
+  await press(page.getByRole("button", { name: "Plan mode" }), project);
+  await dragTitle(page, project, "Call vendor", 60);
+  await press(page.getByRole("button", { name: "Review", exact: true }), project);
   await page.evaluate(() => {
     const store = window as unknown as { __ghost?: number };
     store.__ghost = 0;
     document.addEventListener("click", (event) => {
       const target = event.target;
       if (target instanceof Element && target.closest(".block")) store.__ghost = (store.__ghost || 0) + 1;
-    }, true);
+    });
   });
-  await press(page.getByRole("button", { name: "Plan mode" }), project);
-  await dragTitle(page, project, "Call vendor", 60);
-  await press(page.getByRole("button", { name: "Review", exact: true }), project);
   const approve = page.getByTestId("approve-all");
   await approve.scrollIntoViewIfNeeded();
   const box = await approve.boundingBox();

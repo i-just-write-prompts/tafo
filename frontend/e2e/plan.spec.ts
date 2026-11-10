@@ -1072,12 +1072,14 @@ test("R4 client skips a Changed move and keeps the newer time", async ({ page },
   });
   expect(changed.ok, changed.text).toBeTruthy();
   await page.reload();
-  await expect(page.getByTestId("plan-conflict")).toContainText("Spec review");
+  if (testInfo.project.name === "s23") await expect(page.getByTestId("plan-conflict")).toHaveText("1 changed");
+  else await expect(page.getByTestId("plan-conflict")).toContainText("Changed · Spec review");
   const posts: string[] = [];
   page.on("request", (request) => {
     if (request.method() === "POST" && request.url().includes("/api/decisions/plan/commit")) posts.push(request.postData() || "");
   });
   await press(page.getByRole("button", { name: "Review", exact: true }), testInfo.project.name);
+  await expect(page.getByTestId("changed-tag")).toContainText("Spec review");
   await press(page.getByRole("button", { name: /Approve all/ }), testInfo.project.name);
   await checkSaveClaim(page, {
     case: "matches-server",
@@ -1353,7 +1355,13 @@ test("R2 a stale draft does not overwrite a newer block", async ({ page }, testI
   const draft = JSON.parse(await page.evaluate(() => localStorage.getItem("tafo.v3.plan.v2") || "null"));
   expect(draft.moves.map((item: { id: string }) => item.id)).toEqual([specBefore.id]);
   expect(draft.moves[0].version).toBe(staged.moves[0].version);
-  await expect(page.getByTestId("plan-conflict")).toContainText("Changed · Spec review");
+  if (testInfo.project.name === "s23") {
+    await expect(page.getByTestId("plan-conflict")).toHaveText("1 changed");
+    await press(page.getByRole("button", { name: "Review", exact: true }), testInfo.project.name);
+    await expect(page.getByTestId("changed-tag")).toContainText("Spec review");
+  } else {
+    await expect(page.getByTestId("plan-conflict")).toContainText("Changed · Spec review");
+  }
 });
 
 test.describe("motion", () => {
