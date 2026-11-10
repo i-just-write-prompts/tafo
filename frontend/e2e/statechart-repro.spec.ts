@@ -3,7 +3,7 @@
 import { expect, test, type Page } from "@playwright/test";
 
 import { armWriteFailure, checkSaveClaim, readCalendar } from "./helpers/saveClaim";
-import { block, center, dragHold, openDay, reseed } from "./support";
+import { block, center, dragHold, openDay, press, reseed } from "./support";
 
 test.beforeEach(async ({ page, request }) => {
   await reseed(request);
@@ -37,4 +37,29 @@ test("SY1 a quick drag whose Google write fails never says saved and can be retr
   });
   expect(text, "no success claim for a failed write").not.toMatch(/→/);
   expect(await page.getByRole("button", { name: /retry|try again/i }).count(), "a way to retry the failed edit").toBeGreaterThan(0);
+});
+
+test("PM2 a saved quick drag keeps Undo and its new spot when the re-read fails", async ({ page }, testInfo) => {
+  const before = await blockRow(page, "Lunch w/ Sam");
+  if (!before) throw new Error("fixture missing");
+  let failReads = false;
+  await page.route("**/api/decisions/*/approve", async (route) => {
+    const response = await route.fetch();
+    failReads = true;
+    await route.fulfill({ response });
+  });
+  await page.route("**/api/calendar/blocks", (route) => (failReads ? route.abort() : route.continue()));
+  await drag(page, "Lunch w/ Sam", 60);
+  await page.waitForTimeout(1500);
+  const after = await blockRow(page, "Lunch w/ Sam");
+  const undoCount = await page.getByRole("button", { name: "Undo" }).count();
+  const label = await block(page, "Lunch w/ Sam").getAttribute("aria-label");
+  await page.waitForTimeout(3500);
+  await press(page.getByRole("button", { name: "Plan mode" }), testInfo.project.name);
+  await drag(page, "Lunch w/ Sam", 120);
+  await press(page.getByRole("button", { name: "Revert" }), testInfo.project.name);
+  await press(page.getByRole("button", { name: "Revert all" }), testInfo.project.name);
+  expect(after?.starts_at, "the save reached the server").not.toBe(before.starts_at);
+  expect(undoCount, "Undo is offered after a quick save").toBeGreaterThan(0);
+  expect(label ?? "", "the block shows where Mike put it (1 PM)").toMatch(/1:00–2:00/);
 });
