@@ -78,6 +78,16 @@ export default defineConfig({
         viewport: { width: 1280, height: 800 },
       },
     },
+    {
+      name: "s23",
+      use: {
+        browserName: "chromium",
+        viewport: { width: 360, height: 668 },
+        hasTouch: true,
+        isMobile: true,
+        deviceScaleFactor: 1,
+      },
+    },
   ],
   webServer: [
     {

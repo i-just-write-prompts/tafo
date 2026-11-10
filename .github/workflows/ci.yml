@@ -128,13 +128,18 @@ jobs:
             if (fs.existsSync(resultsPath)) {
               counts = tally(JSON.parse(fs.readFileSync(resultsPath, "utf8")), {});
             }
-            const projects = ["phone", "desktop"];
+            const projects = ["phone", "desktop", "s23"];
+            const labels = {
+              phone: "iPhone 13 WebKit 390×844",
+              desktop: "Desktop Chrome 1280×800",
+              s23: "Galaxy S23 Chrome 360×668",
+            };
             const lines = projects.map((project) => {
               const row = counts[project] || {};
               const parts = ["expected", "unexpected", "flaky", "skipped"]
                 .filter((key) => row[key])
                 .map((key) => `${row[key]} ${key}`);
-              return `| ${project === "phone" ? "iPhone 13 WebKit 390×844" : "Desktop Chrome 1280×800"} | ${parts.join(", ") || "no results"} |`;
+              return `| ${labels[project] || project} | ${parts.join(", ") || "no results"} |`;
             });
             const shots = walk("review-screenshots", []).sort();
             const shotList = shots.length ? shots.map((file) => `- \`${file}\``).join("\n") : "- (none)";

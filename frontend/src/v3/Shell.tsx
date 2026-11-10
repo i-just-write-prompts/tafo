@@ -38,7 +38,6 @@ import {
   dayName,
   dayTitle,
   domainLabel,
-  dragReadout,
   exactClock,
   gutterClock,
   nubLabel,
@@ -126,7 +125,30 @@ export function CalendarShell(props: Props) {
   const [plan, setPlan] = useState<PlanSession>(initialPlan);
   const [filters, setFilters] = useState<ShowFilters>(ALL_SHOWN);
   const [query, setQuery] = useState("");
-  const [overlay, setOverlay] = useState<Overlay>(null);
+  const [overlay, setOverlayState] = useState<Overlay>(null);
+  const [sheetClosing, setSheetClosing] = useState(false);
+  const overlayRef = useRef<Overlay>(null);
+  const closeTimer = useRef<number | null>(null);
+  overlayRef.current = overlay;
+
+  function setOverlay(next: Overlay) {
+    if (closeTimer.current != null) {
+      window.clearTimeout(closeTimer.current);
+      closeTimer.current = null;
+    }
+    const reduce = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    if (next === null && overlayRef.current && !reduce) {
+      setSheetClosing(true);
+      closeTimer.current = window.setTimeout(() => {
+        closeTimer.current = null;
+        setSheetClosing(false);
+        setOverlayState(null);
+      }, 160);
+      return;
+    }
+    setSheetClosing(false);
+    setOverlayState(next);
+  }
   const [gesture, setGesture] = useState<Gesture>({ phase: "idle" });
   const [toast, setToast] = useState<UndoToast<null> | null>(null);
   const [undo, setUndo] = useState<(() => Promise<void>) | null>(null);
@@ -176,8 +198,8 @@ export function CalendarShell(props: Props) {
     return start && end ? withMove(event, start, end, timeZone) : event;
   });
 
-  const dayEvents = events.filter((event) => event.dayKey === anchor);
-  const weekEvents = events.filter((event) => weekKeys.includes(event.dayKey));
+  const dayEvents = shown.filter((event) => event.dayKey === anchor);
+  const weekEvents = shown.filter((event) => weekKeys.includes(event.dayKey));
   const rangeIds = proposalsOnDays(events, mode === "day" ? [anchor] : weekKeys).map((event) => event.id);
   const included = includedIds(rangeIds, plan.skipped);
   const unsavedFits = bannerText(plan.moves.length, rangeIds.length, true).length < 42;
@@ -191,8 +213,7 @@ export function CalendarShell(props: Props) {
 
   useEffect(() => {
     const measure = () => {
-      const phone = window.innerWidth < 600 && window.innerHeight >= 800;
-      setFrame(phone || document.documentElement.dataset.frame === "1");
+      setFrame(document.documentElement.dataset.frame === "1");
       setWidth(gridRef.current?.clientWidth || window.innerWidth);
     };
     measure();
@@ -573,7 +594,7 @@ export function CalendarShell(props: Props) {
 
   const lifted = gesture.phase === "lifted";
   const crossing = dragPreview ? crossingFor(dragPreview, serverEvents) : false;
-  const liveReadout = dragPreview ? readoutFor(dragPreview, serverEvents) : "";
+  const liveParts = dragPreview ? readoutParts(dragPreview, serverEvents) : null;
   const layout = frame ? "frame" : "flow";
   const syncText = props.meta?.calendar_mode === "demo" ? SYNC_DEMO : props.meta?.sync_label || SYNC_DEMO;
   const framedClock = document.documentElement.dataset.frame === "1";
@@ -584,8 +605,10 @@ export function CalendarShell(props: Props) {
       {plan.active ? (
         <PlanBanner
           count={plan.moves.length}
-          text={lifted && liveReadout ? liveReadout : banner}
-          live={lifted}
+          text={banner}
+          live={lifted && liveParts != null}
+          liveTitle={liveParts?.title ?? ""}
+          liveWhen={liveParts?.when ?? ""}
           crossing={lifted && crossing}
           onExit={() => { setPlan(exitPlan()); setOverlay(null); }}
           onRevert={() => setOverlay({ kind: "revert" })}
@@ -671,6 +694,7 @@ export function CalendarShell(props: Props) {
               nowHour={anchor === todayKey ? nowHour : null}
               drag={dragPreview}
               glow={glow}
+              openId={overlay?.kind === "event" ? overlay.id : null}
               onPointerDown={onPointerDown}
               onKeyDown={onBlockKey}
               onOpen={openEvent}
@@ -684,6 +708,7 @@ export function CalendarShell(props: Props) {
               todayIndex={weekKeys.indexOf(todayKey)}
               drag={dragPreview}
               glow={glow}
+              openId={overlay?.kind === "event" ? overlay.id : null}
               onPointerDown={onPointerDown}
               onKeyDown={onBlockKey}
               onOpenDay={(key) => {
@@ -727,7 +752,7 @@ export function CalendarShell(props: Props) {
         ) : null}
       </div>
       {overlay ? (
-      <div className="modal">
+      <div className={sheetClosing ? "modal closing" : "modal"}>
       <div className="scrim" onClick={() => setOverlay(null)} />
       {overlay.kind === "view" ? (
         <div className="view-menu" role="menu" aria-label="Calendar view">
@@ -831,11 +856,11 @@ function crossingFor(preview: Preview, events: CalEvent[]): boolean {
   return crossesWorkHours(event.domain, PlanTime.weekdayIndex(event.dayKey), event.startHour, event.endHour, preview.dayIndex, preview.startHour, end);
 }
 
-function readoutFor(preview: Preview, events: CalEvent[]): string {
+function readoutParts(preview: Preview, events: CalEvent[]): { title: string; when: string } | null {
   const event = events.find((item) => item.id === preview.id);
-  if (!event) return "";
+  if (!event) return null;
   const end = preview.startHour + (event.endHour - event.startHour);
-  return dragReadout(event.title, dayName(preview.dayKey), preview.startHour, end);
+  return { title: event.title, when: `${dayName(preview.dayKey)} ${rangeLabel(preview.startHour, end)}` };
 }
 
 function StatusBar({ framed, time, timeZone }: { framed: boolean; time: Date; timeZone: string }) {
@@ -863,6 +888,8 @@ function PlanBanner(props: {
   count: number;
   text: string;
   live: boolean;
+  liveTitle: string;
+  liveWhen: string;
   crossing: boolean;
   onExit: () => void;
   onRevert: () => void;
@@ -873,7 +900,12 @@ function PlanBanner(props: {
       <PlanGlyph />
       <div className="banner-copy">
         <h1>Plan mode</h1>
-        <p className={props.live ? "banner-live" : undefined}>{props.text}</p>
+        {props.live ? (
+          <p className="banner-live">
+            <span className="banner-title">{props.liveTitle}</span>
+            <span className="banner-when"> · {props.liveWhen}</span>
+          </p>
+        ) : <p>{props.text}</p>}
       </div>
       {props.live && props.crossing ? <span className="tag">Crosses work hours</span> : null}
       {!props.live && props.count === 0 ? <button type="button" className="ghost-btn" onClick={props.onExit}>Exit</button> : null}
@@ -893,6 +925,7 @@ function DayCanvas(props: {
   nowHour: number | null;
   drag: Preview | null;
   glow: string[];
+  openId: string | null;
   onPointerDown: (event: CalEvent, pointer: React.PointerEvent<HTMLButtonElement>) => void;
   onKeyDown: (event: CalEvent, key: React.KeyboardEvent) => void;
   onOpen: (event: CalEvent) => void;
@@ -920,13 +953,21 @@ function DayCanvas(props: {
         const box = boxes.find((item) => item.id === event.id);
         const tap = taps.find((item) => item.id === event.id);
         if (!box || !tap) return null;
+        const lifted = props.drag?.id === event.id;
+        const shift = lifted && props.drag ? dayY(props.drag.startHour) - dayY(event.startHour) : 0;
+        const movedBox = shift === 0 ? box : { ...box, y: box.y + shift };
+        const movedTap = shift === 0 ? tap : { ...tap, y: tap.y + shift };
+        const shown = lifted && props.drag
+          ? { ...event, startHour: props.drag.startHour, endHour: props.drag.startHour + (event.endHour - event.startHour) }
+          : event;
         return (
           <EventButton
             key={event.id}
-            event={event}
-            box={box}
-            tap={tap}
-            lifted={props.drag?.id === event.id}
+            event={shown}
+            box={movedBox}
+            tap={movedTap}
+            lifted={lifted}
+            open={props.openId === event.id}
             glow={props.glow.includes(event.id)}
             onPointerDown={props.onPointerDown}
             onKeyDown={props.onKeyDown}
@@ -934,13 +975,18 @@ function DayCanvas(props: {
           />
         );
       })}
-      {props.nowHour != null ? <NowMark hour={props.nowHour} left={DAY_GUTTER} width={props.width - DAY_GUTTER} hidePill={nearMark(markY, dayY(props.nowHour), 20)} /> : null}
+      {props.nowHour != null ? <NowMark hour={props.nowHour} left={DAY_GUTTER} width={props.width - DAY_GUTTER} hidePill={hideNowPill(markY, dayY(props.nowHour), 11, 8)} /> : null}
       {props.drag ? <DayPill hour={props.drag.startHour} blockX={boxes.find((box) => box.id === props.drag?.id)?.x ?? DAY_GUTTER} /> : null}
     </>
   );
 }
 
-function ghostStyle(box: DayBox | undefined): React.CSSProperties {
+function hideNowPill(markY: number | null, nowY: number, markHalf: number, nowHalf: number): boolean {
+  if (markY == null) return false;
+  return Math.abs(markY - nowY) - markHalf - nowHalf < 20;
+}
+
+function ghostStyle(box: { x: number; y: number; w: number; h: number } | undefined): React.CSSProperties {
   if (!box) return { display: "none" };
   return { left: box.x, top: box.y, width: box.w, height: box.h };
 }
@@ -975,6 +1021,7 @@ function EventButton(props: {
   box: DayBox;
   tap: TapBox;
   lifted: boolean;
+  open: boolean;
   glow: boolean;
   onPointerDown: (event: CalEvent, pointer: React.PointerEvent<HTMLButtonElement>) => void;
   onKeyDown: (event: CalEvent, key: React.KeyboardEvent) => void;
@@ -986,7 +1033,7 @@ function EventButton(props: {
   return (
     <button
       type="button"
-      className={props.lifted ? "block lifted" : "block"}
+      className={props.lifted ? "block lifted" : props.open ? "block open" : "block"}
       style={{ left: tap.x, top: tap.y, width: tap.w, height: tap.h }}
       aria-label={eventLabel(event)}
       data-testid={`block-${event.id}`}
@@ -996,13 +1043,13 @@ function EventButton(props: {
       onContextMenu={(menu) => menu.preventDefault()}
     >
       <span
-        className={`face ${event.state} ${one ? "one" : ""} ${props.glow ? "glow" : ""} ${event.domain}`}
+        className={`face ${event.state} ${one ? "one" : ""} ${props.glow ? "glow" : ""} ${props.open ? "open" : ""} ${event.domain}`}
         style={{
           left: box.x - tap.x,
           top: box.y - tap.y,
           width: box.w,
           height: box.h,
-          background: event.state === "proposed" ? undefined : event.state === "done" ? undefined : fill(event.domain),
+          background: event.state === "approved" ? fill(event.domain) : undefined,
           color: event.state === "proposed" ? line(event.domain) : event.state === "done" ? undefined : text(event.domain),
         }}
       >
@@ -1014,8 +1061,13 @@ function EventButton(props: {
           {one && !(props.lifted && box.w < 200) ? <span>{time}</span> : null}
           {!one ? <span>{time}{event.state === "proposed" ? " · Proposed" : ""}</span> : null}
         </span>
-        {event.state === "proposed" ? <span className="corner" style={{ color: line(event.domain) }}><Sparkle /></span> : null}
       </span>
+      {event.state === "proposed" ? (
+        <span className="corner" style={{ left: box.x - tap.x + box.w - 8, top: box.y - tap.y, color: line(event.domain) }}>
+          <i className="halo" style={{ background: event.startHour >= 9 && event.startHour < 17 ? "var(--workband)" : "var(--bg)" }} />
+          <Sparkle />
+        </span>
+      ) : null}
     </button>
   );
 }
@@ -1028,6 +1080,7 @@ function WeekCanvas(props: {
   todayIndex: number;
   drag: Preview | null;
   glow: string[];
+  openId: string | null;
   onPointerDown: (event: CalEvent, pointer: React.PointerEvent<HTMLButtonElement>) => void;
   onKeyDown: (event: CalEvent, key: React.KeyboardEvent) => void;
   onOpenDay: (dayKey: string) => void;
@@ -1054,20 +1107,26 @@ function WeekCanvas(props: {
         <div key={hour}>
           <div className="hour-line" style={{ top: weekY(hour) }} />
           {hour < 20 && !nearMark(markY, weekY(hour), 12) ? (
-            <div className="hour-label" style={{ top: weekY(hour), left: 0, width: WEEK_GUTTER - 4, textAlign: "right" }}>{clock(hour)}</div>
+            <div className="hour-label" style={{ top: weekY(hour), left: 0, width: WEEK_GUTTER, textAlign: "right", paddingRight: 4 }}>{clock(hour)}</div>
           ) : null}
         </div>
       ))}
+      {props.drag ? <div className="ghost" style={ghostStyle(boxes.find((box) => box.id === props.drag?.id))} /> : null}
       {props.events.map((event) => {
         const box = boxes.find((item) => item.id === event.id);
         if (!box) return null;
+        const lifted = props.drag?.id === event.id;
+        const originDay = Math.max(0, props.weekKeys.indexOf(event.dayKey));
+        const dx = lifted && props.drag ? (props.drag.dayIndex - originDay) * colW : 0;
+        const dy = lifted && props.drag ? weekY(props.drag.startHour) - weekY(event.startHour) : 0;
+        const moved = dx === 0 && dy === 0 ? box : { ...box, x: box.x + dx, y: box.y + dy };
         if (box.slim) {
           return (
             <button
               key={event.id}
               type="button"
               className="slim"
-              style={{ left: box.x, top: box.y, width: box.w, height: box.h, background: fill(event.domain), color: line(event.domain) }}
+              style={{ left: moved.x, top: moved.y, width: moved.w, height: moved.h, background: fill(event.domain), color: line(event.domain) }}
               aria-label={nubLabel(event.title, event.startHour, event.endHour)}
               aria-description="Opens the day"
               onClick={() => props.onOpenDay(event.dayKey)}
@@ -1079,8 +1138,8 @@ function WeekCanvas(props: {
           <button
             key={event.id}
             type="button"
-            className={props.drag?.id === event.id ? "block lifted" : "block"}
-            style={{ left: box.x, top: box.y, width: box.w, height: box.h }}
+            className={lifted ? "block lifted" : props.openId === event.id ? "block open" : "block"}
+            style={{ left: moved.x, top: moved.y, width: moved.w, height: moved.h }}
             aria-label={eventLabel(event)}
             onPointerDown={(pointer) => props.onPointerDown(event, pointer)}
             onKeyDown={(key) => props.onKeyDown(event, key)}
@@ -1088,10 +1147,10 @@ function WeekCanvas(props: {
             onContextMenu={(menu) => menu.preventDefault()}
           >
             <span
-              className={`face ${event.state} ${props.glow.includes(event.id) ? "glow" : ""}`}
+              className={`face ${event.state} ${props.glow.includes(event.id) ? "glow" : ""} ${props.openId === event.id ? "open" : ""}`}
               style={{
                 inset: 0,
-                background: event.state === "proposed" ? undefined : event.state === "done" ? undefined : fill(event.domain),
+                background: event.state === "approved" ? fill(event.domain) : undefined,
                 color: event.state === "proposed" ? line(event.domain) : text(event.domain),
               }}
             >
@@ -1102,13 +1161,18 @@ function WeekCanvas(props: {
                   <strong key={lineText} className={lines.faded ? "week-title fade" : "week-title"}>{lineText}</strong>
                 ))}
               </span>
-              {event.state === "proposed" ? <span className="corner" style={{ color: line(event.domain) }}><Sparkle /></span> : null}
             </span>
+            {event.state === "proposed" ? (
+              <span className="corner" style={{ right: 0, top: 0, color: line(event.domain) }}>
+                <i className="halo" style={{ background: event.startHour >= 9 && event.startHour < 17 ? "var(--workband)" : "var(--bg)" }} />
+                <Sparkle />
+              </span>
+            ) : null}
           </button>
         );
       })}
       {props.nowHour != null && props.todayIndex >= 0 ? (
-        <NowMark hour={props.nowHour} left={WEEK_GUTTER} width={props.width - WEEK_GUTTER} hidePill={nearMark(markY, weekY(props.nowHour), 18)} />
+        <NowMark hour={props.nowHour} left={WEEK_GUTTER} width={props.width - WEEK_GUTTER} hidePill={hideNowPill(markY, weekY(props.nowHour), 8, 8)} />
       ) : null}
       {props.drag ? <div className="gutter-pill week" style={{ left: 1, top: weekY(props.drag.startHour) - 8, width: 34, height: 16 }}>{gutterClock(props.drag.startHour)}</div> : null}
     </>

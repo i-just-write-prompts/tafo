@@ -64,23 +64,29 @@ body { margin: 0; background: #0a0b0d; }
   font-family: Inter, system-ui, sans-serif;
   position: relative;
   overflow: hidden;
+  user-select: none;
+  box-sizing: border-box;
 }
+.v3 *,
+.v3 *::before,
+.v3 *::after { box-sizing: border-box; }
 
-.v3 button,
-.v3 input {
+:where(.v3) button,
+:where(.v3) input {
   font: inherit;
   color: inherit;
   background: none;
   border: 0;
   padding: 0;
 }
+.v3 input { user-select: text; }
 .v3 :focus-visible {
   outline: 2px solid var(--amber);
   outline-offset: -2px;
 }
-.v3 h1,
-.v3 h2,
-.v3 p { margin: 0; }
+:where(.v3) h1,
+:where(.v3) h2,
+:where(.v3) p { margin: 0; }
 
 .v3-status {
   display: none;
@@ -170,15 +176,27 @@ body { margin: 0; background: #0a0b0d; }
   height: 64px;
 }
 .banner-copy { min-width: 0; flex: 1; }
-.banner-copy p,
-.banner-live {
+.banner-copy p {
   color: var(--t2);
   font-size: 13px;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
 }
-.banner-live { color: var(--t1); font-weight: 600; }
+.v3 .banner-live {
+  display: flex;
+  min-width: 0;
+  color: var(--t1);
+  font-size: 13px;
+  font-weight: 600;
+}
+.banner-title {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.banner-when { flex: none; white-space: nowrap; }
 .banner-actions { display: flex; gap: 6px; flex: none; }
 .banner-actions button,
 .tag {
@@ -237,8 +255,19 @@ body { margin: 0; background: #0a0b0d; }
 .day-pill[aria-checked="true"] small,
 .day-pill[aria-checked="true"] b { color: #0a0b0d; }
 .day-pill .mini-spark { position: absolute; bottom: 4px; width: 7px; height: 7px; }
-.week-head { background: none; color: var(--t2); font-size: 16px; font-weight: 500; }
-.week-head small { font-size: 11px; color: var(--t3); }
+.week-head {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 2px;
+  background: none;
+  color: var(--t2);
+  font-size: 16px;
+  font-weight: 500;
+  height: 48px;
+}
+.week-head small { font-size: 11px; color: var(--t3); line-height: 1; }
 .week-head[data-today="true"] b {
   background: var(--t1);
   color: #0a0b0d;
@@ -272,7 +301,9 @@ body { margin: 0; background: #0a0b0d; }
   position: absolute;
   font-size: 11px;
   font-weight: 500;
+  line-height: 1;
   color: var(--t3);
+  white-space: nowrap;
   transform: translateY(-50%);
 }
 .work-end {
@@ -326,8 +357,18 @@ body { margin: 0; background: #0a0b0d; }
 .face .body { position: absolute; inset: 0 8px 0 10px; display: flex; flex-direction: column; justify-content: center; gap: 2px; }
 .face .body strong { font-size: 15px; font-weight: 600; }
 .face .body span { font-size: 13px; font-weight: 400; color: var(--t2); }
-.face.one .body { flex-direction: row; align-items: center; gap: 8px; }
-.face.one .body strong { font-size: 14px; }
+.face.one .body { flex-direction: row; flex-wrap: nowrap; align-items: center; gap: 8px; }
+.face.one .body strong,
+.face.one .body span { white-space: nowrap; }
+.face.one .body strong { font-size: 14px; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.v3[data-mode="week"] .face .body strong {
+  font-size: 11px;
+  line-height: 13px;
+  font-weight: 600;
+}
+.face.proposed { background: color-mix(in srgb, currentColor 12%, transparent); }
+.face.proposed .body span { color: inherit; }
+.face.open { box-shadow: 0 0 0 1.5px var(--t1); }
 .face.done { background: #16181b; color: var(--t3); }
 .face.done strong { text-decoration: line-through; font-weight: 500; }
 .done-check {
@@ -341,7 +382,6 @@ body { margin: 0; background: #0a0b0d; }
   flex: none;
 }
 .done-check svg { width: 10px; height: 10px; }
-.face.proposed { background: transparent; }
 .face .dash {
   position: absolute;
   inset: 0.6px;
@@ -349,17 +389,24 @@ body { margin: 0; background: #0a0b0d; }
   border: 1.3px dashed currentColor;
   pointer-events: none;
 }
-.face .corner {
+.corner {
   position: absolute;
-  top: 0;
-  right: 6px;
-  width: 13px;
-  height: 13px;
-  transform: translateY(-50%);
+  z-index: 4;
+  width: 16px;
+  height: 16px;
+  pointer-events: none;
   display: grid;
   place-items: center;
 }
-.v3[data-mode="week"] .face .corner { width: 10px; height: 10px; right: 2px; }
+.corner .halo {
+  position: absolute;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+}
+.corner .sparkle { position: relative; z-index: 1; width: 13px; height: 13px; }
+.v3[data-mode="week"] .corner .sparkle { width: 10px; height: 10px; }
+.v3[data-mode="week"] .corner .halo { width: 12px; height: 12px; }
 .week-title {
   font-size: 11px;
   font-weight: 600;
@@ -445,7 +492,18 @@ body { margin: 0; background: #0a0b0d; }
 }
 
 .modal { position: absolute; inset: 0; z-index: 20; isolation: isolate; }
-.scrim { position: absolute; inset: 0; background: rgba(0, 0, 0, 0.55); z-index: 0; }
+.scrim { position: absolute; inset: 0; background: rgba(0, 0, 0, 0.55); z-index: 0; animation: v3-fade 250ms var(--ease); }
+.modal .sheet { animation: v3-sheet 250ms var(--ease); }
+.modal .menu,
+.modal .view-menu { animation: v3-fade 200ms var(--ease); }
+.modal.closing .scrim { animation: v3-fade-out 150ms var(--ease) forwards; }
+.modal.closing .sheet { animation: v3-sheet-out 150ms var(--ease) forwards; }
+.modal.closing .menu,
+.modal.closing .view-menu { animation: v3-fade-out 150ms var(--ease) forwards; }
+@keyframes v3-fade { from { opacity: 0; } to { opacity: 1; } }
+@keyframes v3-fade-out { from { opacity: 1; } to { opacity: 0; } }
+@keyframes v3-sheet { from { transform: translateY(100%); } to { transform: translateY(0); } }
+@keyframes v3-sheet-out { from { transform: translateY(0); } to { transform: translateY(100%); } }
 .sheet, .menu, .view-menu {
   position: absolute;
   z-index: 1;
@@ -463,7 +521,7 @@ body { margin: 0; background: #0a0b0d; }
 .sheet-grip { width: 36px; height: 5px; border-radius: 3px; background: #3a3e45; margin: 0 auto 12px; }
 .sheet h2 { font-size: 22px; font-weight: 650; }
 .sheet .sub { color: var(--t2); font-size: 13px; margin-top: 4px; }
-.section-label { color: var(--t3); font-size: 11px; font-weight: 600; letter-spacing: 0.04em; margin: 18px 0 0; }
+.v3 .section-label { color: var(--t3); font-size: 11px; font-weight: 600; letter-spacing: 0.04em; margin: 18px 0 8px; }
 .row, .menu button, .show-row {
   width: 100%;
   min-height: 52px;

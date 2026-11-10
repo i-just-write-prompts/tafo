@@ -10,11 +10,13 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const { webkit } = createRequire(path.join(root, "frontend/package.json"))("@playwright/test");
+const { chromium, webkit } = createRequire(path.join(root, "frontend/package.json"))("@playwright/test");
 
 const out = path.join(root, "docs", "v3-build");
 const frames = path.join(out, "phone");
+const s23 = path.join(out, "s23-360x668");
 const clips = path.join(out, "clips");
+let shotDir = frames;
 const e2eDir = fs.mkdtempSync(path.join(os.tmpdir(), "tafo-v3-capture-"));
 const python = fs.existsSync(path.join(root, ".venv", "bin", "python"))
   ? path.join(root, ".venv", "bin", "python")
@@ -22,6 +24,7 @@ const python = fs.existsSync(path.join(root, ".venv", "bin", "python"))
 const NOW = Date.parse("2026-11-10T15:40:00Z");
 
 fs.mkdirSync(frames, { recursive: true });
+fs.mkdirSync(s23, { recursive: true });
 fs.mkdirSync(clips, { recursive: true });
 
 function start(cmd, args, env, cwd = root) {
@@ -58,7 +61,7 @@ async function waitFor(url) {
 }
 
 async function shot(page, name) {
-  await page.screenshot({ path: path.join(frames, `${name}.png`) });
+  await page.screenshot({ path: path.join(shotDir, `${name}.png`) });
 }
 
 async function drag(page, fromX, fromY, toX, toY, { release = true, picture = null } = {}) {
@@ -66,7 +69,10 @@ async function drag(page, fromX, fromY, toX, toY, { release = true, picture = nu
   await page.mouse.down();
   await page.waitForTimeout(420);
   await page.mouse.move(toX, toY, { steps: 18 });
-  if (picture) await shot(page, picture);
+  if (picture) {
+    await page.waitForTimeout(120);
+    await shot(page, picture);
+  }
   if (release) await page.mouse.up();
   await page.waitForTimeout(200);
 }
@@ -77,8 +83,8 @@ async function center(locator) {
   return { x: box.x + box.width / 2, y: box.y + Math.min(box.height / 2, 16) };
 }
 
-async function open(page) {
-  await page.addInitScript((fixed) => {
+async function open(page, frame) {
+  await page.addInitScript(({ fixed, frame }) => {
     const RealDate = Date;
     const started = RealDate.now();
     const shiftedNow = () => fixed + (RealDate.now() - started);
@@ -94,12 +100,12 @@ async function open(page) {
     ShiftedDate.UTC = RealDate.UTC;
     window.Date = ShiftedDate;
     const mark = () => {
-      if (document.documentElement) document.documentElement.dataset.frame = "1";
+      if (frame && document.documentElement) document.documentElement.dataset.frame = "1";
     };
     mark();
     document.addEventListener("DOMContentLoaded", mark);
     window.__tafoNow = new Date().toISOString();
-  }, NOW);
+  }, { fixed: NOW, frame });
   await page.goto("http://127.0.0.1:4179/");
   try {
     await page.getByRole("heading", { name: "Tue, Nov 10" }).waitFor({ timeout: 15_000 });
@@ -134,7 +140,7 @@ try {
   const page = await context.newPage();
   page.on("pageerror", (error) => console.error("PAGE ERROR", error.message));
   page.on("console", (message) => console.log("CONSOLE", message.type(), message.text()));
-  await open(page);
+  await open(page, true);
 
   await shot(page, "01-day");
   await page.getByTestId("more-button").tap();
@@ -142,6 +148,7 @@ try {
   await page.getByRole("menuitem", { name: /Show/ }).tap();
   await shot(page, "01c-show");
   await page.keyboard.press("Escape");
+  await page.waitForTimeout(250);
 
   const vendor = await center(page.getByRole("button", { name: /Call vendor,/ }));
   await drag(page, vendor.x, vendor.y, vendor.x, vendor.y + 45, { release: false, picture: "02-quick-drag" });
@@ -149,7 +156,8 @@ try {
   await page.mouse.up();
   await page.waitForTimeout(600);
   await shot(page, "02b-quick-saved");
-  await page.getByRole("button", { name: "Dismiss tip" }).tap();
+  const tip = page.getByRole("button", { name: "Dismiss tip" });
+  if (await tip.count()) await tip.tap();
   await page.waitForTimeout(4500);
 
   await page.getByRole("button", { name: /Budget sheet/ }).tap();
@@ -161,6 +169,7 @@ try {
 
   await page.getByTestId("view-switch").tap();
   await page.getByRole("menuitem", { name: "Week" }).tap();
+  await page.waitForTimeout(250);
   await shot(page, "04-week");
   await page.getByTestId("plan-button").tap();
   await shot(page, "05-plan-enter");
@@ -170,7 +179,8 @@ try {
   const lunch = await center(page.getByRole("button", { name: /Lunch w\/ Sam/ }));
   await drag(page, lunch.x, lunch.y, await columnX(page, 3), lunch.y);
   const gym = await center(page.getByRole("button", { name: /^Gym,/ }));
-  await drag(page, gym.x, gym.y, gym.x, Math.min(gym.y + 190, 780));
+  const limit = (page.viewportSize()?.height ?? 800) - 36;
+  await drag(page, gym.x, gym.y, gym.x, Math.min(gym.y + 190, limit));
   const rosa = await center(page.getByRole("button", { name: /Call Grandma Rosa/ }));
   await drag(page, rosa.x, rosa.y, await columnX(page, 3), rosa.y - 70, { release: false, picture: "06-plan-rearrange" });
   await page.mouse.up();
@@ -207,7 +217,7 @@ try {
       recordVideo: { dir: clips, size: { width: 390, height: 844 } },
     });
     const clip = await recording.newPage();
-    await open(clip);
+    await open(clip, true);
     await run(clip);
     const video = clip.video();
     await recording.close();
@@ -237,7 +247,48 @@ try {
   });
 
   await browser.close();
-  console.log("captured", frames);
+
+  await fetch("http://127.0.0.1:8791/api/e2e/reset", { method: "POST" });
+  const chrome = await chromium.launch();
+  const narrow = await chrome.newContext({
+    viewport: { width: 360, height: 668 },
+    deviceScaleFactor: 1,
+    hasTouch: true,
+    isMobile: true,
+  });
+  const phone = await narrow.newPage();
+  shotDir = s23;
+  await open(phone, false);
+  await shot(phone, "01-day");
+  await phone.getByTestId("more-button").tap();
+  await shot(phone, "01b-more-menu");
+  await phone.keyboard.press("Escape");
+  const narrowVendor = await center(phone.getByRole("button", { name: /Call vendor,/ }));
+  await drag(phone, narrowVendor.x, narrowVendor.y, narrowVendor.x, narrowVendor.y + 45, { release: false, picture: "02-quick-drag" });
+  await phone.mouse.move(narrowVendor.x, narrowVendor.y + 60, { steps: 8 });
+  await phone.mouse.up();
+  await phone.waitForTimeout(400);
+  await shot(phone, "02b-quick-saved");
+  if (await phone.getByRole("button", { name: "Dismiss tip" }).count()) {
+    await phone.getByRole("button", { name: "Dismiss tip" }).tap();
+  }
+  await phone.keyboard.press("Escape");
+  await phone.getByRole("button", { name: /Budget sheet/ }).tap();
+  await shot(phone, "03-event-tapped");
+  await phone.keyboard.press("Escape");
+  await phone.getByTestId("view-switch").tap();
+  await shot(phone, "04a-view-switch");
+  await phone.getByRole("menuitem", { name: "Week" }).tap();
+  await phone.waitForTimeout(250);
+  await shot(phone, "04-week");
+  await phone.getByTestId("plan-button").tap();
+  await shot(phone, "05-plan-enter");
+  const narrowSpec = await center(phone.getByRole("button", { name: /Spec review/ }));
+  await drag(phone, narrowSpec.x, narrowSpec.y, await columnX(phone, 2), narrowSpec.y, { release: false, picture: "06-plan-rearrange" });
+  await phone.mouse.up();
+  await narrow.close();
+  await chrome.close();
+  console.log("captured", frames, s23);
 } finally {
   api.kill("SIGTERM");
   web.kill("SIGTERM");

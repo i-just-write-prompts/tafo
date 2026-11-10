@@ -43,7 +43,7 @@ export async function openDay(page: Page): Promise<void> {
 
 export async function press(locator: Locator, projectName: string): Promise<void> {
   await locator.scrollIntoViewIfNeeded();
-  if (projectName === "phone") await locator.tap();
+  if (projectName === "phone" || projectName === "s23") await locator.tap();
   else await locator.click();
 }
 
