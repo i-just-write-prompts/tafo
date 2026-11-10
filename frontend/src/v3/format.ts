@@ -155,7 +155,7 @@ export function partialPlanToast(saved: number, requested: number, unsaved: stri
   return `Saved ${saved} of ${requested}. ${tail}`;
 }
 
-export const SAVE_UNCONFIRMED = "The save went through, but the calendar didn't refresh. Your plan is still here.";
+export const SAVED_REFRESH = "Saved. The calendar will refresh shortly.";
 
 export function denyToast(title: string): string {
   return `Denied · ${title} → Unscheduled`;

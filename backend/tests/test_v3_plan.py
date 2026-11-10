@@ -304,6 +304,43 @@ def test_plan_commit_requires_the_ui_session(tmp_path):
         client.__exit__(None, None, None)
 
 
+def test_repeating_a_commit_with_the_same_key_changes_nothing(tmp_path):
+    client = open_week(tmp_path)
+    try:
+        spec = block_named(client, "Spec review")
+        body = {
+            "confirmed": True,
+            "moves": [
+                {
+                    "block_id": spec["id"],
+                    "expected_version": spec["version"],
+                    "starts_at": local(2, 9, 30),
+                    "ends_at": local(2, 11),
+                    "idempotency_key": "v3-plan-spec-once",
+                    "title": "Spec review",
+                }
+            ],
+            "approvals": [],
+        }
+        first = client.post("/api/decisions/plan/commit", json=body)
+        assert first.status_code == 200, first.text
+        assert first.json()["moves"][0]["saved"] is True
+        moved = block_named(client, "Spec review")
+        second = client.post("/api/decisions/plan/commit", json=body)
+        assert second.status_code == 200, second.text
+        assert second.json()["moves"][0]["idempotent_replay"] is True
+        again = block_named(client, "Spec review")
+        assert again["starts_at"] == moved["starts_at"] == local(2, 9, 30)
+        assert again["version"] == moved["version"]
+        updates = [
+            row for row in client.get("/api/hermes/proposals").json()["proposals"]
+            if row["idempotency_key"] == "v3-plan-spec-once"
+        ]
+        assert len(updates) == 1
+    finally:
+        client.__exit__(None, None, None)
+
+
 def test_commit_refuses_an_empty_plan(tmp_path):
     client = open_week(tmp_path)
     try:

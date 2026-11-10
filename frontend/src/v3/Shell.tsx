@@ -32,7 +32,7 @@ import {
   REVERT_TOAST,
   SYNC_DEMO,
   TIP_TEXT,
-  SAVE_UNCONFIRMED,
+  SAVED_REFRESH,
   approveLabel,
   approvedToast,
   bannerText,
@@ -52,7 +52,7 @@ import {
 import { COMMIT_PX, gestureDown, gestureMove, gestureUp, HOLD_MS, holdReady, type Gesture } from "./gesture";
 import { CheckGlyph, Chevron, MoreGlyph, PlanGlyph, SearchGlyph, Sparkle } from "./icons";
 import { ALL_SHOWN, buildEvents, showSummary, visibleEvents, withMove, type CalEvent, type ShowFilters } from "./model";
-import { approveDisabled, clearPlanStorage, conflictingMoveIds, enterPlan, exitPlan, includedIds, loadPlan, pendingProposalIds, proposalsOnDays, retainMoves, savePlan, splitPlanSave, stageMove, toggleSkip, type PlanSession, type StagedMove } from "./session";
+import { approveDisabled, conflictingMoveIds, enterPlan, exitPlan, includedIds, loadPlan, pendingProposalIds, proposalsOnDays, retainMoves, savePlan, stageMove, toggleSkip, type PlanSession, type StagedMove } from "./session";
 import { wrapWeekTitle } from "./titles";
 import { showUndo, type UndoToast } from "./undo";
 import "./v3.css";
@@ -193,6 +193,7 @@ export function CalendarShell(props: Props) {
   const [settle, setSettle] = useState<Settle | null>(null);
   const [lockId, setLockId] = useState<string | null>(null);
   const suppressClick = useRef(false);
+  const approving = useRef(false);
   const toastToken = useRef(0);
   const propsRef = useRef(props);
   propsRef.current = props;
@@ -763,8 +764,26 @@ export function CalendarShell(props: Props) {
     nudge(event, minutes, days);
   }
 
+  async function readCalendar() {
+    const waits = [0, 200, 500];
+    for (let attempt = 0; attempt < waits.length; attempt += 1) {
+      if (waits[attempt] > 0) await new Promise((resolve) => window.setTimeout(resolve, waits[attempt]));
+      try {
+        const [blockBody, proposalBody] = await Promise.all([
+          api<{ blocks: CalendarBlock[] }>("/api/calendar/blocks"),
+          api<{ proposals: Proposal[] }>("/api/hermes/proposals"),
+        ]);
+        return { blockBody, proposalBody };
+      } catch {
+        if (attempt === waits.length - 1) return null;
+      }
+    }
+    return null;
+  }
+
   async function approveAll() {
-    if (busy || approveDisabled(plan.moves.length, included.length)) return;
+    if (busy || approving.current || approveDisabled(plan.moves.length, included.length)) return;
+    approving.current = true;
     const moves = [];
     const approvals = [];
     for (const move of plan.moves) {
@@ -796,59 +815,47 @@ export function CalendarShell(props: Props) {
       if (!event) continue;
       approvals.push({ proposal_id: id, expected_version: event.version });
     }
-    const requestedMoves = plan.moves
-      .filter((move) => serverEvents.some((event) => event.id === move.id))
-      .map((move) => ({ id: move.id, kind: move.kind, to: move.to }));
-    const extraProposalIds = approvals
-      .map((item) => item.proposal_id)
-      .filter((id) => !requestedMoves.some((move) => move.id === id));
     setBusy(true);
     try {
-      await api("/api/decisions/plan/commit", {
+      const committed = await api<{
+        moves: Array<{ saved: boolean; item_id: string; item_title: string }>;
+        approvals: Array<{ saved: boolean; item_id: string; item_title: string }>;
+      }>("/api/decisions/plan/commit", {
         method: "POST",
         body: JSON.stringify({ confirmed: true, moves, approvals }),
       });
-      let blockBody: { blocks: CalendarBlock[] };
-      let proposalBody: { proposals: Proposal[] };
-      try {
-        [blockBody, proposalBody] = await Promise.all([
-          api<{ blocks: CalendarBlock[] }>("/api/calendar/blocks"),
-          api<{ proposals: Proposal[] }>("/api/hermes/proposals"),
-        ]);
-      } catch {
-        setOverlay(null);
-        pushToast(SAVE_UNCONFIRMED);
-        return;
-      }
-      const saved = splitPlanSave(
-        requestedMoves,
-        extraProposalIds,
-        blockBody.blocks,
-        proposalBody.proposals.map((proposal) => ({ id: proposal.id, ...proposalTimes(proposal) })),
+      const savedIds = new Set(
+        [...committed.moves, ...committed.approvals].filter((item) => item.saved).map((item) => item.item_id),
       );
-      const unsavedIds = [...saved.unsavedMoveIds, ...missing.map((move) => move.id)];
-      const unsavedTitles = unsavedIds.map((id) => plan.moves.find((move) => move.id === id)?.title || "A move");
+      const unsavedIds = plan.moves.filter((move) => !savedIds.has(move.id)).map((move) => move.id);
       const kept = retainMoves(plan, unsavedIds);
-      if (kept.moves.length === 0) {
-        clearPlanStorage();
-        setPlan(exitPlan());
-      } else {
-        setPlan(kept);
-      }
+      savePlan(kept);
+      setPlan(kept);
       setOverrides({});
       setOverlay(null);
-      const savedCount = saved.savedMoveIds.length + saved.savedProposalIds.length;
-      const requestedCount = savedCount + unsavedIds.length;
-      const message = unsavedIds.length === 0
-        ? approvedToast(saved.savedMoveIds.length, saved.savedProposalIds.length)
-        : partialPlanToast(savedCount, requestedCount, unsavedTitles);
-      if (savedCount > 0) glowIds([...saved.savedMoveIds, ...saved.savedProposalIds]);
+      const savedMoves = committed.moves.filter((item) => item.saved).length;
+      const savedProposals = committed.approvals.filter((item) => item.saved).length;
+      const unsavedTitles = [
+        ...committed.moves.filter((item) => !item.saved).map((item) => item.item_title || "A move"),
+        ...committed.approvals.filter((item) => !item.saved).map((item) => item.item_title || "A proposal"),
+        ...missing.map((move) => move.title),
+      ];
+      const confirmed = await readCalendar();
+      const message = unsavedTitles.length > 0
+        ? partialPlanToast(savedMoves + savedProposals, savedMoves + savedProposals + unsavedTitles.length, unsavedTitles)
+        : confirmed
+          ? approvedToast(savedMoves, savedProposals)
+          : SAVED_REFRESH;
+      if (savedMoves + savedProposals > 0) {
+        glowIds([...committed.moves, ...committed.approvals].filter((item) => item.saved).map((item) => item.item_id));
+      }
       pushToast(message);
-      await propsRef.current.onRefresh();
+      if (confirmed) await propsRef.current.onRefresh();
     } catch (error) {
       if (error instanceof ApiError && error.code === "version_conflict") setOverlay(null);
       await fail(error);
     } finally {
+      approving.current = false;
       setBusy(false);
     }
   }

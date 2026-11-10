@@ -1,4 +1,4 @@
-import { expect, test, type Locator, type Page } from "@playwright/test";
+import { expect, test, type Locator, type Page, type Route } from "@playwright/test";
 
 import { block, center, dragHold, openDay, press, reseed, shot } from "./support";
 
@@ -899,33 +899,78 @@ test("R1 a failed calendar write stays in the plan", async ({ page }, testInfo) 
   expect(draft.active).toBe(true);
 });
 
-test("R1 a missed refresh does not say the plan failed", async ({ page }, testInfo) => {
+test("V3 a failed confirmation read still drops saved moves", async ({ page }, testInfo) => {
   let commitLanded = false;
-  await page.route("**/api/calendar/blocks", async (route) => {
+  const failRead = async (route: Route) => {
     if (commitLanded && route.request().method() === "GET") {
-      await route.abort();
+      await route.fulfill({ status: 500, contentType: "application/json", body: "{\"detail\":\"down\"}" });
       return;
     }
     await route.continue();
-  });
+  };
+  await page.route("**/api/calendar/blocks", failRead);
+  await page.route("**/api/hermes/proposals", failRead);
   page.on("response", (response) => {
     if (response.url().includes("/api/decisions/plan/commit") && response.status() === 200) commitLanded = true;
+  });
+  await press(page.getByTestId("view-switch"), testInfo.project.name);
+  await press(page.getByRole("menuitem", { name: "Week" }), testInfo.project.name);
+  await press(page.getByRole("button", { name: "Plan mode" }), testInfo.project.name);
+  const spec = block(page, "Spec review");
+  await spec.scrollIntoViewIfNeeded();
+  const at = await center(spec);
+  const column = await page.locator(".workband").first().evaluate((node) => node.getBoundingClientRect().width);
+  await uiDrag(page, testInfo.project.name, at.x, at.y, at.x + column, at.y);
+  const lunch = block(page, "Lunch w/ Sam");
+  const lunchAt = await center(lunch);
+  await uiDrag(page, testInfo.project.name, lunchAt.x, lunchAt.y, lunchAt.x + column, lunchAt.y);
+  await expect(page.getByTestId("plan-banner")).toContainText("2 moves");
+  const staged = JSON.parse(await page.evaluate(() => localStorage.getItem("tafo.v3.plan.v2") || "null"));
+  await press(page.getByRole("button", { name: "Review", exact: true }), testInfo.project.name);
+  await press(page.getByRole("button", { name: /Approve all/ }), testInfo.project.name);
+  const toast = page.getByTestId("plan-toast");
+  await expect(toast).toHaveText("Saved. The calendar will refresh shortly.");
+  await expect(toast).not.toContainText("unsaved");
+  await expect(toast).not.toContainText("Nothing was changed");
+  expect(await page.evaluate(() => localStorage.getItem("tafo.v3.plan.v2"))).toBeNull();
+  await page.unroute("**/api/calendar/blocks");
+  await page.unroute("**/api/hermes/proposals");
+  await page.reload();
+  await expect(page.getByTestId("plan-banner")).toHaveCount(0);
+  await press(page.getByTestId("view-switch"), testInfo.project.name);
+  await press(page.getByRole("menuitem", { name: "Week" }), testInfo.project.name);
+  const after = await calendarState(page);
+  for (const move of staged.moves) {
+    const row = after.blocks.find((item) => item.id === move.id);
+    expect(Date.parse(row?.starts_at || "")).toBe(Date.parse(move.to.start));
+    const label = await block(page, move.title).getAttribute("aria-label");
+    expect(label).toContain(uiWhen(row?.starts_at || ""));
+  }
+  expect(after.proposals.filter((item) => item.kind === "calendar_block" && item.status === "pending")).toHaveLength(0);
+});
+
+test("V3 double tap approve all applies once", async ({ page }, testInfo) => {
+  let commits = 0;
+  page.on("request", (request) => {
+    if (request.method() === "POST" && request.url().includes("/api/decisions/plan/commit")) commits += 1;
   });
   await press(page.getByRole("button", { name: "Plan mode" }), testInfo.project.name);
   const vendor = await center(block(page, "Call vendor,"));
   await dragHold(page, vendor.x, vendor.y, vendor.x, vendor.y + 60);
+  const staged = JSON.parse(await page.evaluate(() => localStorage.getItem("tafo.v3.plan.v2") || "null"));
   await press(page.getByRole("button", { name: "Review", exact: true }), testInfo.project.name);
-  await press(page.getByRole("button", { name: /Approve all/ }), testInfo.project.name);
+  await page.getByRole("button", { name: /Approve all/ }).evaluate((node) => {
+    node.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    node.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+  });
   const toast = page.getByTestId("plan-toast");
-  await expect(toast).toContainText("The save went through, but the calendar didn't refresh");
-  await expect(toast).not.toContainText("failed");
-  await expect(toast).not.toContainText("Nothing was changed");
-  const draft = JSON.parse(await page.evaluate(() => localStorage.getItem("tafo.v3.plan.v2") || "null"));
-  expect(draft.moves.length).toBeGreaterThan(0);
-  await page.unroute("**/api/calendar/blocks");
+  await expect(toast).toContainText(/Approved|Saved/);
+  await expect(toast).not.toContainText("changed");
+  expect(commits).toBe(1);
   const after = await calendarState(page);
-  const moved = after.blocks.find((item) => item.title === "Call vendor");
-  expect(moved && Date.parse(moved.starts_at)).not.toBe(Date.parse("2026-11-10T15:00:00Z"));
+  const row = after.blocks.find((item) => item.id === staged.moves[0].id);
+  expect(Date.parse(row?.starts_at || "")).toBe(Date.parse(staged.moves[0].to.start));
+  expect(await page.evaluate(() => localStorage.getItem("tafo.v3.plan.v2"))).toBeNull();
 });
 
 test("R2 a stale draft does not overwrite a newer block", async ({ page }, testInfo) => {
