@@ -250,27 +250,28 @@ export function weekBoxes(events: WeekEvent[], width: number): WeekBox[] {
   });
 }
 
-/** Widen a visible week block into hidden neighbours. The reserved lane width stays `box.w`. */
+/** Widen visible week blocks across hidden neighbours without painting over each other. */
 export function paintedWeekSpan(box: WeekBox, boxes: WeekBox[], visibleIds: ReadonlySet<string>, width: number): { x: number; w: number } {
   const colW = weekColumnWidth(width);
   const dayOf = (item: WeekBox) => Math.floor((item.x - WEEK_GUTTER + 1) / colW);
   const day = dayOf(box);
   const cluster = boxes
     .filter((other) => dayOf(other) === day && other.y < box.y + box.h && box.y < other.y + other.h)
-    .sort((a, b) => a.x - b.x);
-  const mine = cluster.findIndex((item) => item.id === box.id);
-  if (mine < 0) return { x: box.x, w: box.w };
-  let left = mine;
-  while (left > 0 && !visibleIds.has(cluster[left - 1].id)) left -= 1;
-  let right = mine;
-  while (right < cluster.length - 1 && !visibleIds.has(cluster[right + 1].id)) right += 1;
-  const span = cluster.slice(left, right + 1);
-  const visible = span.filter((item) => visibleIds.has(item.id));
-  const start = span[0].x;
-  const end = span[span.length - 1].x + span[span.length - 1].w;
-  if (visible.length <= 1) return { x: start, w: end - start };
-  const each = (end - start - WEEK_LANE_GAP * (visible.length - 1)) / visible.length;
-  const index = visible.findIndex((item) => item.id === box.id);
+    .sort((a, b) => a.x - b.x || a.id.localeCompare(b.id));
+  if (!visibleIds.has(box.id) || cluster.length === 0) return { x: box.x, w: box.w };
+  const lanes: WeekBox[][] = [];
+  for (const item of cluster) {
+    const last = lanes[lanes.length - 1];
+    if (last && Math.abs(last[0].x - item.x) < 0.5) last.push(item);
+    else lanes.push([item]);
+  }
+  const start = cluster[0].x;
+  const end = cluster[cluster.length - 1].x + cluster[cluster.length - 1].w;
+  const visibleLanes = lanes.filter((lane) => lane.some((item) => visibleIds.has(item.id)));
+  if (visibleLanes.length <= 1) return { x: start, w: end - start };
+  const each = (end - start - WEEK_LANE_GAP * (visibleLanes.length - 1)) / visibleLanes.length;
+  const index = visibleLanes.findIndex((lane) => lane.some((item) => item.id === box.id));
+  if (index < 0) return { x: box.x, w: box.w };
   return { x: start + index * (each + WEEK_LANE_GAP), w: each };
 }
 
