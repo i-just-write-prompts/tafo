@@ -104,3 +104,37 @@ test("PR1 moving a Proposed block outside Plan mode makes it Mike's decision", a
   expect(label ?? "", "no Proposed after Mike moves it").not.toMatch(/Proposed/);
   expect(approveButtons + denyButtons, "no Approve/Deny after Mike moves it").toBe(0);
 });
+
+test("PR2 Approve all takes every listed suggestion even when its calendar is hidden", async ({ page }, testInfo) => {
+  const before = await readCalendar(page);
+  const closet = before.proposals.find((item) => item.kind === "calendar_block" && before.tasks.some((task) => task.id === item.payload.task_id && task.title === "Fix closet door"));
+  const budget = before.proposals.find((item) => item.kind === "calendar_block" && before.tasks.some((task) => task.id === item.payload.task_id && task.title === "Budget sheet"));
+  if (!closet || !budget) throw new Error("fixture missing");
+  await press(page.getByTestId("more-button"), testInfo.project.name);
+  await press(page.getByRole("menuitem", { name: /Show/ }), testInfo.project.name);
+  await press(page.getByRole("button", { name: "Home" }), testInfo.project.name);
+  await page.keyboard.press("Escape");
+  await page.waitForTimeout(300);
+  await press(page.getByTestId("view-switch"), testInfo.project.name);
+  await press(page.getByRole("menuitem", { name: "Week" }), testInfo.project.name);
+  await press(page.getByRole("button", { name: "Plan mode" }), testInfo.project.name);
+  const spec = block(page, "Spec review");
+  await spec.scrollIntoViewIfNeeded();
+  const at = await center(spec);
+  const column = await page.locator(".workband").first().evaluate((node) => node.getBoundingClientRect().width);
+  await dragHold(page, at.x, at.y, at.x + column, at.y);
+  await press(page.getByRole("button", { name: "Review", exact: true }), testInfo.project.name);
+  const sheet = page.getByTestId("review-sheet");
+  const listed = await sheet.innerText();
+  await press(page.getByTestId("approve-all"), testInfo.project.name);
+  await checkSaveClaim(page, {
+    case: "matches-server",
+    toast: page.getByTestId("plan-toast"),
+    includes: ["Approved"],
+    proposals: [
+      { id: closet.id, status: "approved" },
+      { id: budget.id, status: "approved" },
+    ],
+  });
+  expect(listed).toContain("Fix closet door");
+});
