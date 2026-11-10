@@ -594,6 +594,24 @@ export function CalendarShell(props: Props) {
         : current.point;
       const released = gestureMove(current, point, performance.now());
       const result = gestureUp(released);
+      if (native.type !== "pointercancel" && result.tap) {
+        const dayKey = event.dayKey;
+        const eventId = event.id;
+        const weekTap = mode === "week";
+        let sawClick = false;
+        const note = () => { sawClick = true; };
+        window.addEventListener("click", note, true);
+        window.setTimeout(() => {
+          window.removeEventListener("click", note, true);
+          if (sawClick) return;
+          if (weekTap) {
+            setAnchor(dayKey);
+            setMode("day");
+          } else {
+            setOverlay({ kind: "event", id: eventId });
+          }
+        }, 80);
+      }
       if (result.commit && released.phase === "lifted") {
         suppressClick.current = true;
         const face = gridRef.current?.querySelector(`[data-testid="block-${released.eventId}"] .face`);

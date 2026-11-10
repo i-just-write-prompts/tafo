@@ -24,25 +24,46 @@ function intersection(
 
 async function expectClearOfEvents(page: Page, toast: Locator) {
   const toastBox = await toast.boundingBox();
-  if (!toastBox) throw new Error("toast geometry missing");
+  const tray = await page.locator(".v3-tray").boundingBox();
+  if (!toastBox || !tray) throw new Error("toast geometry missing");
+  expect(toastBox.y).toBeGreaterThanOrEqual(tray.y - 1);
+  expect(toastBox.y + toastBox.height).toBeLessThanOrEqual(tray.y + tray.height + 1);
+  await expect(page.getByTestId("unscheduled")).toContainText("Unscheduled");
+  await expect(page.getByTestId("sync-chip")).toContainText("Demo · not synced");
+  for (const id of ["unscheduled", "sync-chip"]) {
+    const control = await page.getByTestId(id).boundingBox();
+    if (control && intersection(control, toastBox)) {
+      expect(false, `toast overlaps ${id}`).toBe(true);
+    }
+  }
+  const grid = page.locator(".v3-grid");
   const grids = [];
   for (const id of ["day-grid", "week-grid"]) {
-    const grid = page.getByTestId(id);
-    if (await grid.count() === 0) continue;
-    const box = await grid.boundingBox();
+    const item = page.getByTestId(id);
+    if (await item.count() === 0) continue;
+    const box = await item.boundingBox();
     if (box) grids.push(box);
   }
-  const blocks = await page.locator(".block, .slim").all();
-  for (const item of blocks) {
-    const box = await item.boundingBox();
-    if (!box) continue;
-    for (const gridBox of grids) {
-      const visible = intersection(box, gridBox);
-      if (visible && intersection(visible, toastBox)) {
-        expect(false, `toast overlaps ${await item.getAttribute("aria-label")}`).toBe(true);
+  const original = await grid.evaluate((node) => node.scrollTop);
+  const stops = await grid.evaluate((node) => {
+    const max = node.scrollHeight - node.clientHeight;
+    return [0, Math.round(max / 2), max];
+  });
+  for (const top of stops) {
+    await grid.evaluate((node, value) => { node.scrollTop = value; }, top);
+    const blocks = await page.locator(".block, .slim").all();
+    for (const item of blocks) {
+      const box = await item.boundingBox();
+      if (!box) continue;
+      for (const gridBox of grids) {
+        const visible = intersection(box, gridBox);
+        if (visible && intersection(visible, toastBox)) {
+          expect(false, `toast overlaps ${await item.getAttribute("aria-label")} at scroll ${top}`).toBe(true);
+        }
       }
     }
   }
+  await grid.evaluate((node, value) => { node.scrollTop = value; }, original);
 }
 
 test.beforeEach(async ({ page, request }) => {
@@ -69,7 +90,11 @@ test("quick drag saves with a toast and Undo", async ({ page }, testInfo) => {
   await dragHold(page, start.x, start.y, start.x, start.y + 60);
   const toast = page.getByTestId("plan-toast");
   await expect(toast).toContainText("Call vendor → 11:00 AM");
-  await expect(toast.getByRole("button", { name: "Undo" })).toBeVisible();
+  const undo = toast.getByRole("button", { name: "Undo" });
+  await expect(undo).toBeVisible();
+  const undoBox = await undo.boundingBox();
+  expect(undoBox?.width).toBeGreaterThanOrEqual(44);
+  expect(undoBox?.height).toBeGreaterThanOrEqual(44);
   await expect(page.getByTestId("sync-chip")).toContainText("Demo · not synced");
   await expect(page.getByTestId("plan-banner")).toHaveCount(0);
   await expectOneLine(toast);
@@ -109,11 +134,11 @@ test("deny", async ({ page }, testInfo) => {
   await shot(page, testInfo, "denied");
 });
 
-async function touchDrag(page: import("@playwright/test").Page, fromX: number, fromY: number, toX: number, toY: number) {
+async function touchDrag(page: import("@playwright/test").Page, fromX: number, fromY: number, toX: number, toY: number, hold = 450) {
   const client = await page.context().newCDPSession(page);
   const point = (x: number, y: number) => ({ x, y, id: 1, radiusX: 2, radiusY: 2, force: 0.5, rotationAngle: 0 });
   await client.send("Input.dispatchTouchEvent", { type: "touchStart", touchPoints: [point(fromX, fromY)] });
-  await page.waitForTimeout(450);
+  await page.waitForTimeout(hold);
   const steps = 12;
   for (let step = 1; step <= steps; step += 1) {
     await client.send("Input.dispatchTouchEvent", {
@@ -223,6 +248,70 @@ test("first touch drag after scrolling saves on the first try", async ({ page },
   await press(page.getByTestId("view-switch"), testInfo.project.name);
   await press(page.getByRole("menuitem", { name: "Week" }), testInfo.project.name);
   await expect(block(page, "Hike,")).toHaveAttribute("aria-label", hikeAfter ?? "");
+});
+
+test("a swipe on an event pans, and the next tap opens it", async ({ page }, testInfo) => {
+  test.skip(testInfo.project.name === "desktop", "touch scrolling");
+  const grid = page.getByTestId("day-grid");
+  const mid = await grid.evaluate((node) => {
+    const max = node.scrollHeight - node.clientHeight;
+    node.scrollTop = Math.round(max / 2);
+    return { top: node.scrollTop, max };
+  });
+  expect(mid.top).toBeGreaterThan(8);
+  expect(mid.max - mid.top).toBeGreaterThan(8);
+  const lunch = block(page, "Lunch w/ Sam");
+  const before = await lunch.getAttribute("aria-label");
+  const box = await lunch.boundingBox();
+  const gridBox = await grid.boundingBox();
+  if (!box || !gridBox || !before) throw new Error("lunch missing");
+  const x = box.x + Math.min(24, box.width / 2);
+  const y = Math.min(gridBox.y + gridBox.height - 30, Math.max(gridBox.y + 24, box.y + 20));
+  const hit = await page.evaluate(({ x, y }) => {
+    const node = document.elementFromPoint(x, y);
+    const button = node instanceof HTMLElement ? node.closest("button") : null;
+    return button?.getAttribute("aria-label") ?? null;
+  }, { x, y });
+  expect(hit).toBe(before);
+  if (testInfo.project.name === "s23") {
+    await touchDrag(page, x, y, x, y + 90, 0);
+    const down = await grid.evaluate((node) => node.scrollTop);
+    expect(down).toBeLessThan(mid.top - 30);
+    expect(await lunch.getAttribute("aria-label")).toBe(before);
+    await touchDrag(page, x, y, x, y - 90, 0);
+    const up = await grid.evaluate((node) => node.scrollTop);
+    expect(up).toBeGreaterThan(down + 30);
+    expect(await lunch.getAttribute("aria-label")).toBe(before);
+  }
+  await grid.evaluate((node) => { node.scrollTop = 40; });
+  const tapped = await lunch.boundingBox();
+  if (!tapped) throw new Error("lunch left the grid");
+  const tx = tapped.x + 20;
+  const ty = Math.min(gridBox.y + gridBox.height - 16, Math.max(gridBox.y + 16, tapped.y + 16));
+  const tapHit = await page.evaluate(({ x, y }) => {
+    const node = document.elementFromPoint(x, y);
+    return node instanceof HTMLElement ? node.closest("button")?.getAttribute("aria-label") ?? null : null;
+  }, { x: tx, y: ty });
+  expect(tapHit).toContain("Lunch w/ Sam");
+  await lunch.tap();
+  await expect(page.getByRole("heading", { name: "Lunch w/ Sam" })).toBeVisible();
+});
+
+test("Monday approval does not include other days' proposals", async ({ page }, testInfo) => {
+  await press(page.getByRole("radio", { name: /^Mon/ }), testInfo.project.name);
+  await expect(page.getByRole("heading", { name: "Mon, Nov 9" })).toBeVisible();
+  await press(page.getByRole("button", { name: "Plan mode" }), testInfo.project.name);
+  const gymBlock = block(page, "Gym");
+  await gymBlock.scrollIntoViewIfNeeded();
+  const gym = await center(gymBlock);
+  await dragHold(page, gym.x, gym.y, gym.x, Math.min(gym.y + 70, (page.viewportSize()?.height ?? 800) - 24));
+  await expect(page.getByTestId("plan-banner")).toContainText("1 move");
+  await expect(page.getByTestId("plan-banner")).not.toContainText("agent suggests");
+  await press(page.getByRole("button", { name: "Review", exact: true }), testInfo.project.name);
+  await expect(page.getByRole("button", { name: "Approve all · 1 move" })).toBeVisible();
+  await expect(page.getByRole("button", { name: /proposal/ })).toHaveCount(0);
+  await expect(page.getByText("Budget sheet")).toHaveCount(0);
+  await expect(page.getByText("Fix closet door")).toHaveCount(0);
 });
 
 test("Plan enter keeps the current view", async ({ page }, testInfo) => {

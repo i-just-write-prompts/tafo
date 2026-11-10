@@ -470,9 +470,9 @@ body { margin: 0; background: #0a0b0d; }
   background: #121418;
   border-radius: 18px 18px 0 0;
   display: flex;
-  align-items: flex-start;
+  align-items: flex-end;
   justify-content: space-between;
-  padding: 28px 16px 0;
+  padding: 0 16px;
   flex: none;
   position: relative;
 }
@@ -639,7 +639,7 @@ body { margin: 0; background: #0a0b0d; }
   pointer-events: none;
 }
 .v3[data-layout="frame"] .v3-toast-slot,
-.v3[data-layout="flow"] .v3-toast-slot { bottom: 24px; }
+.v3[data-layout="flow"] .v3-toast-slot { bottom: 48px; }
 .toast {
   position: relative;
   z-index: 1;
