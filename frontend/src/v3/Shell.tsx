@@ -260,6 +260,24 @@ export function CalendarShell(props: Props) {
   }, []);
 
   useEffect(() => {
+    setOverrides((current) => {
+      const ids = Object.keys(current);
+      if (ids.length === 0) return current;
+      let changed = false;
+      const next = { ...current };
+      for (const id of ids) {
+        const block = props.blocks.find((item) => item.id === id);
+        const span = current[id];
+        if (block && sameInstant(block.starts_at, span.start) && sameInstant(block.ends_at, span.end)) {
+          delete next[id];
+          changed = true;
+        }
+      }
+      return changed ? next : current;
+    });
+  }, [props.blocks]);
+
+  useEffect(() => {
     const measure = () => {
       setFrame(document.documentElement.dataset.frame === "1");
       setWidth(gridRef.current?.clientWidth || window.innerWidth);
@@ -524,7 +542,11 @@ export function CalendarShell(props: Props) {
         rememberTip(message);
       }
       glowIds([event.id]);
-      await propsRef.current.onRefresh();
+      try {
+        await propsRef.current.onRefresh();
+      } catch {
+        return;
+      }
       setOverrides((current) => {
         const copy = { ...current };
         delete copy[event.id];
