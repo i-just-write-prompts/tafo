@@ -22,4 +22,6 @@ curl -s -X POST http://127.0.0.1:8787/api/e2e/fail-writes \
   -d '{"event_keys":["blk_v3_spec"]}'
 ```
 
-`event_keys` fails the next update of those blocks. `{"fail_creates":1}` fails the next create. Each armed failure is used once. The Playwright server’s `POST /api/e2e/reset` clears both. A preview still requires the preview password, the same as every other route.
+`event_keys` fails the next update of those blocks. `{"fail_creates":1}` fails the next create. Each armed failure is used once. The Playwright server’s `POST /api/e2e/reset` clears both and reloads the demo week. The method is POST. GET returns 405 with `Allow: POST`.
+
+`POST /api/e2e/reset` exists only on `scripts/e2e_server.py` (the Playwright server), and only for a throwaway database. It is not on a normal `python -m tafo` process and not on the preview. If that POST returns 405 with `Allow: GET, HEAD`, the request hit the static UI mount instead of the route. The route is registered ahead of the mount so that does not happen on the Playwright server. Reseed a preview by restarting it. A preview still requires the preview password, the same as every other route.

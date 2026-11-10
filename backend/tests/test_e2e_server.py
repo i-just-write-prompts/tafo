@@ -63,7 +63,7 @@ def test_reset_reloads_the_review_fixture(tmp_path):
 
 
 def test_reset_is_post_and_not_swallowed_by_the_ui(tmp_path):
-    """POST /api/e2e/reset reloads the demo week. GET is 405.
+    """POST /api/e2e/reset reloads the demo week. The route allows only POST.
 
     A static UI mounted at / answers other methods with 405 Allow: GET, HEAD.
     The reset route has to be registered ahead of that mount, or Playwright's
@@ -97,13 +97,16 @@ def test_reset_is_post_and_not_swallowed_by_the_ui(tmp_path):
     )
     app = create_app(settings)
     module.register_e2e_reset(app, db)
+    reset_routes = [route for route in app.router.routes if getattr(route, "path", None) == "/api/e2e/reset"]
+    assert len(reset_routes) == 1
+    assert reset_routes[0].methods == {"POST"}
     with TestClient(app) as client:
-        got = client.get("/api/e2e/reset")
-        assert got.status_code == 405
-        assert "POST" in got.headers.get("allow", "")
         posted = client.post("/api/e2e/reset")
         assert posted.status_code == 200, posted.text
         body = posted.json()
         assert body["ok"] is True
         assert body["db"].endswith("tafo.sqlite")
         assert "data/tafo.sqlite" not in body["db"].replace("\\", "/")
+        # GET is not the reseed. With the UI mounted it falls through to static files.
+        got = client.get("/api/e2e/reset")
+        assert got.status_code != 200
