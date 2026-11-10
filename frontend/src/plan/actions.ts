@@ -3,7 +3,7 @@ import type { CalendarBlock, Proposal, Task } from "../types";
 
 export interface DecisionResult {
   proposal: Proposal;
-  outbox: { status?: string; honest_label?: string } | null;
+  outbox: { id?: string; status?: string; honest_label?: string } | null;
   block: CalendarBlock | null;
   idempotent_replay: boolean;
 }

@@ -11,6 +11,7 @@ import {
   dragReadout,
   gutterClock,
   quickToast,
+  refusedMoveToast,
   rangeLabel,
   shortRange,
   weekTitle,
@@ -32,6 +33,7 @@ describe("v3 clock copy", () => {
     expect(gutterClock(10.75)).toBe("10:45");
     expect(gutterClock(11)).toBe("11:00");
     expect(quickToast("Call vendor", 11)).toBe("Call vendor → 11:00 AM");
+    expect(refusedMoveToast("Lunch w/ Sam")).toBe("Lunch w/ Sam didn't move.");
     expect(dragReadout("Call Grandma Rosa", "Thu", 16.5, 17.5)).toBe("Call Grandma Rosa · Thu 4:30–5:30 PM");
     expect(compactRange(10.5, 11)).toBe("10:30–11 AM");
   });

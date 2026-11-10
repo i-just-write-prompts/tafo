@@ -79,6 +79,11 @@ export function quickToast(title: string, startHour: number): string {
   return `${title} → ${clockMinutes(startHour)}`;
 }
 
+/** A refused calendar write. No arrow: an arrow is the saved-move claim. */
+export function refusedMoveToast(title: string): string {
+  return `${title} didn't move.`;
+}
+
 export function dayName(dayKey: string): string {
   return DAYS[PlanTime.weekdayIndex(dayKey)];
 }

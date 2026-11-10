@@ -45,6 +45,7 @@ import {
   exactClock,
   gutterClock,
   quickToast,
+  refusedMoveToast,
   rangeLabel,
   shortRange,
   weekTitle,
@@ -177,6 +178,7 @@ export function CalendarShell(props: Props) {
   const [gesture, setGesture] = useState<Gesture>({ phase: "idle" });
   const [toast, setToast] = useState<UndoToast<null> | null>(null);
   const [undo, setUndo] = useState<(() => Promise<void>) | null>(null);
+  const [retry, setRetry] = useState<(() => Promise<void>) | null>(null);
   const [tip, setTip] = useState(false);
   const [glow, setGlow] = useState<string[]>([]);
   const [live, setLive] = useState("");
@@ -315,6 +317,7 @@ export function CalendarShell(props: Props) {
     const timer = window.setTimeout(() => {
       setToast(null);
       setUndo(null);
+      setRetry(null);
     }, delay);
     return () => window.clearTimeout(timer);
   }, [toast]);
@@ -391,11 +394,12 @@ export function CalendarShell(props: Props) {
     window.setTimeout(() => setLive(message), 20);
   }
 
-  function pushToast(message: string, undoFn?: () => Promise<void>) {
+  function pushToast(message: string, undoFn?: () => Promise<void>, retryFn?: () => Promise<void>) {
     const token = toastToken.current + 1;
     toastToken.current = token;
     setToast(showUndo(message, null, Date.now(), token));
     setUndo(() => undoFn ?? null);
+    setRetry(() => retryFn ?? null);
     say(message);
   }
 
@@ -419,6 +423,31 @@ export function CalendarShell(props: Props) {
       say(`${message}. ${TIP_TEXT}`);
     } catch {
       setTip(true);
+    }
+  }
+
+  async function retryRefused(outboxId: string, title: string, start: string, end: string) {
+    setBusy(true);
+    try {
+      const result = await api<{ operation: { status?: string } | null; block: CalendarBlock | null }>(
+        `/api/calendar/outbox/${outboxId}/retry`,
+        { method: "POST" },
+      );
+      if (!calendarWriteLanded({ outbox: result.operation, block: result.block }, start, end)) {
+        pushToast(refusedMoveToast(title), undefined, () => retryRefused(outboxId, title, start, end));
+        return;
+      }
+      const part = PlanTime.parts(new Date(start), timeZone);
+      pushToast(quickToast(title, part.hour + part.minute / 60));
+      try {
+        await propsRef.current.onRefresh();
+      } catch {
+        /* The write landed. The next poll catches up. */
+      }
+    } catch (error) {
+      await fail(error);
+    } finally {
+      setBusy(false);
     }
   }
 
@@ -465,6 +494,21 @@ export function CalendarShell(props: Props) {
         const block = propsRef.current.blocks.find((item) => item.id === event.id);
         if (!block) return;
         const saved = await writeBlock(block, event.title, startIso, endIso, acknowledgeFixed);
+        if (!calendarWriteLanded(saved, startIso, endIso)) {
+          setOverrides((current) => {
+            const copy = { ...current };
+            delete copy[event.id];
+            return copy;
+          });
+          const outboxId = saved.outbox?.id;
+          const title = event.title;
+          pushToast(
+            refusedMoveToast(title),
+            undefined,
+            outboxId ? () => retryRefused(outboxId, title, startIso, endIso) : undefined,
+          );
+          return;
+        }
         const hour = withMove(event, startIso, endIso, timeZone).startHour;
         const message = quickToast(event.title, hour);
         const nextBlock = saved.block;
@@ -1116,7 +1160,8 @@ export function CalendarShell(props: Props) {
           <div className="toast" data-testid="plan-toast" role="status">
             <ToastIcon message={toast.message} />
             <ToastCopy message={toast.message} />
-            {undo ? <button type="button" onClick={() => { const run = undo; setToast(null); setUndo(null); void run(); }}>Undo</button> : null}
+            {undo ? <button type="button" onClick={() => { const run = undo; setToast(null); setUndo(null); setRetry(null); void run(); }}>Undo</button> : null}
+            {retry ? <button type="button" onClick={() => { const run = retry; setToast(null); setUndo(null); setRetry(null); void run(); }}>Retry</button> : null}
           </div>
         ) : null}
       </div>
@@ -1257,7 +1302,7 @@ function StatusBar({ framed, time, timeZone }: { framed: boolean; time: Date; ti
 }
 
 function toastKind(message: string): "info" | "plain" | "ok" {
-  if (message.includes("still in plan") || message.includes(" changed")) return "info";
+  if (message.includes("still in plan") || message.includes(" changed") || message.includes("didn't move")) return "info";
   if (message.startsWith("Reverted") || message.startsWith("Denied")) return "plain";
   return "ok";
 }
@@ -1353,6 +1398,17 @@ function settleMotion(settle: Settle | null, id: string): { className: string; s
       bottom: "auto",
     },
   };
+}
+
+function calendarWriteLanded(
+  saved: { outbox: { status?: string } | null; block: { starts_at: string; ends_at: string } | null },
+  start: string,
+  end: string,
+): boolean {
+  const status = saved.outbox?.status;
+  if (status !== "simulated" && status !== "synced") return false;
+  if (!saved.block) return false;
+  return sameInstant(saved.block.starts_at, start) && sameInstant(saved.block.ends_at, end);
 }
 
 function proposalTimes(proposal: Proposal): { status: string; starts_at?: string; ends_at?: string } {
