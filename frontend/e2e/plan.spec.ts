@@ -134,6 +134,12 @@ test("deny", async ({ page }, testInfo) => {
   await shot(page, testInfo, "denied");
 });
 
+/** Desktop and WebKit send a real pointer drag. Chromium touch sends a real touch drag. */
+async function uiDrag(page: import("@playwright/test").Page, project: string, fromX: number, fromY: number, toX: number, toY: number, hold = 450) {
+  if (project === "s23") await touchDrag(page, fromX, fromY, toX, toY, hold);
+  else await dragHold(page, fromX, fromY, toX, toY);
+}
+
 async function touchDrag(page: import("@playwright/test").Page, fromX: number, fromY: number, toX: number, toY: number, hold = 450) {
   const client = await page.context().newCDPSession(page);
   const point = (x: number, y: number) => ({ x, y, id: 1, radiusX: 2, radiusY: 2, force: 0.5, rotationAngle: 0 });
@@ -442,15 +448,10 @@ test("keyboard-only path", async ({ page }) => {
   await expect(page.getByRole("button", { name: /Budget sheet/ })).toHaveCount(0);
 });
 
-test("week moves stay painted and revert restores every block", async ({ page }, testInfo) => {
+test("B1 week plan move + revert repaints immediately", async ({ page }, testInfo) => {
   await press(page.getByTestId("view-switch"), testInfo.project.name);
   await press(page.getByRole("menuitem", { name: "Week" }), testInfo.project.name);
   await press(page.getByRole("button", { name: "Plan mode" }), testInfo.project.name);
-  const grid = page.getByTestId("week-grid");
-  const gridBox = await grid.boundingBox();
-  if (!gridBox) throw new Error("week grid missing");
-  const gutter = Number(await grid.getAttribute("data-gutter"));
-  const column = (gridBox.width - gutter - 2) / 7;
 
   async function painted(title: string) {
     const host = block(page, title);
@@ -466,17 +467,20 @@ test("week moves stay painted and revert restores every block", async ({ page },
     expect(textBox.x).toBeLessThan(hostBox.x + hostBox.width);
   }
 
+  const designAt = await center(block(page, "Design crit"));
   const spec = await center(block(page, "Spec review"));
-  await dragHold(page, spec.x, spec.y, gridBox.x + gutter + column * 2 + column / 2, spec.y);
-  await expect(block(page, "Spec review")).toHaveAttribute("aria-label", /Wed/);
+  await uiDrag(page, testInfo.project.name, spec.x, spec.y, designAt.x, designAt.y);
+  await expect(block(page, "Spec review")).toHaveAttribute("aria-label", /Thu/);
   await painted("Spec review");
+  await painted("Design crit");
 
   const budget = block(page, "Budget sheet");
   await budget.scrollIntoViewIfNeeded();
   const budgetAt = await center(budget);
-  await dragHold(page, budgetAt.x, budgetAt.y, gridBox.x + gutter + column * 4 + column / 2, budgetAt.y);
-  await expect(budget).toHaveAttribute("aria-label", /Fri/);
+  const lunchAt = await center(block(page, "Lunch w/ Sam"));
+  await uiDrag(page, testInfo.project.name, budgetAt.x, budgetAt.y, lunchAt.x, lunchAt.y);
   await painted("Budget sheet");
+  await painted("Lunch w/ Sam");
 
   await press(page.getByRole("button", { name: "Revert" }), testInfo.project.name);
   await press(page.getByRole("button", { name: "Revert all" }), testInfo.project.name);
@@ -489,7 +493,7 @@ test("week moves stay painted and revert restores every block", async ({ page },
   await expect(budget).toContainText("Budget");
 });
 
-test("overlapping events stay side by side in week and day", async ({ page }, testInfo) => {
+test("B2 week and day overlaps stay side by side", async ({ page }, testInfo) => {
   await press(page.getByTestId("view-switch"), testInfo.project.name);
   await press(page.getByRole("menuitem", { name: "Week" }), testInfo.project.name);
   const design = await block(page, "Design crit").boundingBox();
@@ -511,7 +515,7 @@ test("overlapping events stay side by side in week and day", async ({ page }, te
   expect(spec.x + spec.width).toBeLessThanOrEqual(vendor.x + 1);
 });
 
-test("toggling an unrelated calendar does not rewrap a week title", async ({ page }, testInfo) => {
+test("B3 calendar toggle keeps the week title wrap", async ({ page }, testInfo) => {
   await press(page.getByTestId("view-switch"), testInfo.project.name);
   await press(page.getByRole("menuitem", { name: "Week" }), testInfo.project.name);
   const before = await block(page, "Design crit").locator("strong").allTextContents();
@@ -523,7 +527,7 @@ test("toggling an unrelated calendar does not rewrap a week title", async ({ pag
   expect(after).toEqual(before);
 });
 
-test("the tray opens from info, drags up, and drags closed", async ({ page }, testInfo) => {
+test("B4 tray info tap and grip drag", async ({ page }, testInfo) => {
   const grid = page.getByTestId("day-grid");
   const before = await grid.boundingBox();
   await press(page.getByTestId("sync-chip"), testInfo.project.name);
@@ -542,22 +546,16 @@ test("the tray opens from info, drags up, and drags closed", async ({ page }, te
   if (!gripBox) throw new Error("grip missing");
   const x = gripBox.x + gripBox.width / 2;
   const y = gripBox.y + gripBox.height / 2;
-  await page.mouse.move(x, y);
-  await page.mouse.down();
-  await page.mouse.move(x, y + 80, { steps: 8 });
-  await page.mouse.up();
+  await uiDrag(page, testInfo.project.name, x, y, x, y + 80, 0);
   await expect(sheet).toHaveAttribute("data-open", "0");
 
-  await page.mouse.move(x, y);
-  await page.mouse.down();
-  await page.mouse.move(x, y - 80, { steps: 8 });
-  await page.mouse.up();
+  await uiDrag(page, testInfo.project.name, x, y, x, y - 80, 0);
   await expect(sheet).toHaveAttribute("data-open", "1");
   await expect(page.getByTestId("unscheduled")).toContainText("Unscheduled");
   await expect(page.getByTestId("sync-chip")).toContainText("Demo · not synced");
 });
 
-test("a week block opens in place and the day header opens that day", async ({ page }, testInfo) => {
+test("B5 week block opens in place and the header opens the day", async ({ page }, testInfo) => {
   await press(page.getByTestId("view-switch"), testInfo.project.name);
   await press(page.getByRole("menuitem", { name: "Week" }), testInfo.project.name);
   await press(block(page, "Design crit"), testInfo.project.name);
@@ -569,14 +567,14 @@ test("a week block opens in place and the day header opens that day", async ({ p
   await expect(page.getByRole("heading", { name: "Thu, Nov 12" })).toBeVisible();
 });
 
-test("moving a proposal decides it, counts as a move, and revert restores it", async ({ page }, testInfo) => {
+test("B6 moving a proposal decides it and revert restores it", async ({ page }, testInfo) => {
   await press(page.getByTestId("view-switch"), testInfo.project.name);
   await press(page.getByRole("menuitem", { name: "Week" }), testInfo.project.name);
   await press(page.getByRole("button", { name: "Plan mode" }), testInfo.project.name);
   const budget = block(page, "Budget sheet");
   await budget.scrollIntoViewIfNeeded();
   const at = await center(budget);
-  await dragHold(page, at.x, at.y, at.x, at.y + 70);
+  await uiDrag(page, testInfo.project.name, at.x, at.y, at.x, at.y + 70);
   await expect(page.getByTestId("plan-banner")).toContainText("1 move");
   await expect(page.getByTestId("plan-banner")).toContainText("agent suggests 1");
   await expect(budget).not.toHaveAttribute("aria-label", /Proposed/);

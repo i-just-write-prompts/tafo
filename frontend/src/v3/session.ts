@@ -51,42 +51,6 @@ export function revertMoves(session: PlanSession): PlanSession {
   return { ...session, moves: [] };
 }
 
-const PLAN_KEY = "tafo.v3.plan";
-
-export function loadPlan(): PlanSession {
-  try {
-    const raw = globalThis.localStorage?.getItem(PLAN_KEY);
-    if (!raw) return initialPlan();
-    const parsed = JSON.parse(raw) as Partial<PlanSession>;
-    if (!parsed || !Array.isArray(parsed.moves)) return initialPlan();
-    return {
-      active: Boolean(parsed.active),
-      moves: parsed.moves,
-      skipped: Array.isArray(parsed.skipped) ? parsed.skipped : [],
-    };
-  } catch {
-    return initialPlan();
-  }
-}
-
-export function savePlan(session: PlanSession): void {
-  try {
-    if (!session.active && session.moves.length === 0) {
-      globalThis.localStorage?.removeItem(PLAN_KEY);
-      return;
-    }
-    globalThis.localStorage?.setItem(PLAN_KEY, JSON.stringify(session));
-  } catch {
-    /* Private mode can refuse the write. The in-memory session still works. */
-  }
-}
-
-/** A proposal Mike has already moved is his decision, not a second suggestion. */
-export function pendingProposalIds(proposalIds: string[], moves: { id: string }[]): string[] {
-  const moved = new Set(moves.map((move) => move.id));
-  return proposalIds.filter((id) => !moved.has(id));
-}
-
 export function includedIds(proposalIds: string[], skipped: string[]): string[] {
   const skip = new Set(skipped);
   return proposalIds.filter((id) => !skip.has(id));

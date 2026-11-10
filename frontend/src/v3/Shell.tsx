@@ -621,6 +621,7 @@ export function CalendarShell(props: Props) {
       }
       if (result.commit && released.phase === "lifted") {
         suppressClick.current = true;
+        window.setTimeout(() => { suppressClick.current = false; }, 100);
         const face = gridRef.current?.querySelector(`[data-testid="block-${released.eventId}"] .face`);
         if (face instanceof HTMLElement) {
           const rect = face.getBoundingClientRect();
