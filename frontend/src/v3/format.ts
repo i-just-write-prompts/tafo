@@ -136,7 +136,7 @@ export function approvedToast(moves: number, proposals: number): string {
 }
 
 export function denyToast(title: string): string {
-  return `Denied · ${title} moved to Unscheduled`;
+  return `Denied · ${title} → Unscheduled`;
 }
 export const REVERT_TOAST = "Reverted. Nothing changed.";
 export const SYNC_DEMO = "Demo · not synced";

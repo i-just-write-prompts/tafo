@@ -361,8 +361,11 @@ body { margin: 0; background: #0a0b0d; }
   transition: left 0.35s var(--ease), top 0.35s var(--ease), width 0.35s var(--ease), height 0.35s var(--ease);
 }
 .face.settle-lock,
-.face.settling { transition: none; transform-origin: top left; }
-.face.settling.live { transition: transform 350ms var(--ease); }
+.face.settling { transition: none; }
+.face.settling.live {
+  transition: left 350ms var(--ease), top 350ms var(--ease), width 350ms var(--ease), height 350ms var(--ease);
+}
+.v3-grid { overscroll-behavior: none; }
 .v3[data-mode="week"] .face { border-radius: 5px; }
 .block.lifted { z-index: 5; }
 .block.lifted .face {
@@ -393,9 +396,7 @@ body { margin: 0; background: #0a0b0d; }
 }
 .v3[data-narrow="1"][data-mode="week"] .face .body strong,
 .v3[data-narrow="1"][data-mode="week"] .week-title {
-  font-size: 10.5px;
-  line-height: 12px;
-  letter-spacing: -0.35px;
+  letter-spacing: -0.4px;
 }
 .face.proposed { background: color-mix(in srgb, currentColor 12%, transparent); }
 .face.proposed .body span { color: inherit; }
@@ -648,10 +649,10 @@ body { margin: 0; background: #0a0b0d; }
 .v3[data-sheet="1"] .toast { visibility: hidden; }
 .toast p {
   font-size: 15px;
+  line-height: 18px;
   padding: 0 12px 0 6px;
-  white-space: nowrap;
+  white-space: normal;
   overflow: hidden;
-  text-overflow: ellipsis;
   min-width: 0;
 }
 .toast button { min-width: 64px; height: 44px; padding: 0 14px; font-weight: 600; border-left: 1px solid #3a3e45; }

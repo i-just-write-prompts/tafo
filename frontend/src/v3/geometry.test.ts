@@ -108,6 +108,19 @@ describe("week geometry and drag", () => {
     });
     expect(across.day).toBe(2);
     expect(across.start).toBe(9.5);
+    const held = moveByPointer({
+      originStart: 10,
+      originDay: 1,
+      duration: 0.5,
+      deltaY: 67,
+      pointerX: 80,
+      pxPerHour: 60,
+      gutter: 56,
+      columnWidth: 50,
+      allowDayChange: false,
+      previousSnap: 11.25,
+    });
+    expect(held.start).toBe(11.25);
   });
 
   it("flags a personal block that newly crosses work hours", () => {

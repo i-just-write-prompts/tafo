@@ -55,6 +55,15 @@ export function snapHour(hour: number): number {
   return Math.round((hour + 1e-9) * 4) / 4;
 }
 
+/** Stay in the slot already on screen until the pointer is a few pixels past the boundary. */
+export function snapHourStable(previous: number | null, raw: number, pxPerHour: number): number {
+  const next = snapHour(raw);
+  if (previous == null || Math.abs(next - previous) < 1e-9) return next;
+  const boundary = (previous + next) / 2;
+  if (Math.abs(raw - boundary) * pxPerHour < 6) return previous;
+  return next;
+}
+
 export function dayY(hour: number): number {
   return (hour - DAY_ORIGIN) * DAY_PX;
 }
@@ -281,8 +290,10 @@ export function moveByPointer(input: {
   gutter: number;
   columnWidth: number;
   allowDayChange: boolean;
+  previousSnap?: number | null;
 }): { day: number; start: number } {
-  let start = snapHour(input.originStart + input.deltaY / input.pxPerHour);
+  const raw = input.originStart + input.deltaY / input.pxPerHour;
+  let start = snapHourStable(input.previousSnap ?? null, raw, input.pxPerHour);
   const latest = 24 - input.duration;
   if (start < 0) start = 0;
   if (start > latest) start = snapHour(latest);

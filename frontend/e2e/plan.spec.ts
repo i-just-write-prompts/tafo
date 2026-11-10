@@ -20,6 +20,7 @@ test("opens on Day", async ({ page }, testInfo) => {
 test("quick drag saves with a toast and Undo", async ({ page }, testInfo) => {
   const vendor = block(page, "Call vendor,");
   const start = await center(vendor);
+  const scrollBefore = await page.getByTestId("day-grid").evaluate((node) => node.scrollTop);
   await dragHold(page, start.x, start.y, start.x, start.y + 60);
   const toast = page.getByTestId("plan-toast");
   await expect(toast).toContainText("Call vendor → 11:00 AM");
@@ -29,9 +30,13 @@ test("quick drag saves with a toast and Undo", async ({ page }, testInfo) => {
   const toastBox = await toast.boundingBox();
   const trayBox = await page.locator(".v3-tray").boundingBox();
   const budgetBox = await block(page, "Budget sheet").boundingBox();
-  if (!toastBox || !trayBox || !budgetBox) throw new Error("toast geometry missing");
+  const gridBox = await page.getByTestId("day-grid").boundingBox();
+  const scrollAfter = await page.getByTestId("day-grid").evaluate((node) => node.scrollTop);
+  if (!toastBox || !trayBox || !budgetBox || !gridBox) throw new Error("toast geometry missing");
+  expect(scrollAfter).toBe(scrollBefore);
   expect(toastBox.y + toastBox.height).toBeLessThanOrEqual(trayBox.y + 1);
-  const coversBudget = toastBox.y < budgetBox.y + budgetBox.height - 1 && toastBox.y + toastBox.height > budgetBox.y + 1;
+  const budgetBottom = Math.min(budgetBox.y + budgetBox.height, gridBox.y + gridBox.height);
+  const coversBudget = toastBox.y < budgetBottom - 1 && toastBox.y + toastBox.height > budgetBox.y + 1;
   expect(coversBudget).toBe(false);
   await shot(page, testInfo, "quick-drag-toast");
   await press(toast.getByRole("button", { name: "Undo" }), testInfo.project.name);
@@ -54,11 +59,28 @@ test("deny", async ({ page }, testInfo) => {
   await press(block(page, "Budget sheet"), testInfo.project.name);
   await press(page.getByRole("button", { name: "Deny", exact: true }), testInfo.project.name);
   const toast = page.getByTestId("plan-toast");
-  await expect(toast).toHaveText("Denied · Budget sheet moved to Unscheduled");
+  await expect(toast).toHaveText("Denied · Budget sheet → Unscheduled");
   await expect(toast.getByRole("button", { name: "Undo" })).toHaveCount(0);
   await expect(page.getByRole("button", { name: /Budget sheet/ })).toHaveCount(0);
   await shot(page, testInfo, "denied");
 });
+
+async function touchDrag(page: import("@playwright/test").Page, fromX: number, fromY: number, toX: number, toY: number) {
+  const client = await page.context().newCDPSession(page);
+  const point = (x: number, y: number) => ({ x, y, id: 1, radiusX: 2, radiusY: 2, force: 0.5, rotationAngle: 0 });
+  await client.send("Input.dispatchTouchEvent", { type: "touchStart", touchPoints: [point(fromX, fromY)] });
+  await page.waitForTimeout(450);
+  const steps = 12;
+  for (let step = 1; step <= steps; step += 1) {
+    await client.send("Input.dispatchTouchEvent", {
+      type: "touchMove",
+      touchPoints: [point(fromX + ((toX - fromX) * step) / steps, fromY + ((toY - fromY) * step) / steps)],
+    });
+    await page.waitForTimeout(16);
+  }
+  await client.send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
+  await page.waitForTimeout(200);
+}
 
 test("Week view", async ({ page }, testInfo) => {
   await press(page.getByTestId("view-switch"), testInfo.project.name);
@@ -68,6 +90,54 @@ test("Week view", async ({ page }, testInfo) => {
   await expect(page.getByTestId("view-switch")).toContainText("Week");
   await expect(page.getByRole("button", { name: /Spec review/ })).toBeVisible();
   await shot(page, testInfo, "week");
+});
+
+test("narrow week drags retimes morning blocks and a partly hidden one", async ({ page }, testInfo) => {
+  await press(page.getByTestId("view-switch"), testInfo.project.name);
+  await press(page.getByRole("menuitem", { name: "Week" }), testInfo.project.name);
+  await press(page.getByRole("button", { name: "Plan mode" }), testInfo.project.name);
+  const grid = page.getByTestId("week-grid");
+  const scrollAtOpen = await grid.evaluate((node) => node.scrollTop);
+  expect(scrollAtOpen).toBe(0);
+
+  async function dragBy(name: string, fromX: number, fromY: number, toX: number, toY: number) {
+    if (testInfo.project.name === "s23") await touchDrag(page, fromX, fromY, toX, toY);
+    else await dragHold(page, fromX, fromY, toX, toY);
+  }
+
+  const spec = block(page, "Spec review");
+  const specBefore = await spec.getAttribute("aria-label");
+  const specAt = await center(spec);
+  await dragBy("Spec review", specAt.x, specAt.y, specAt.x, specAt.y + 80);
+  await expect(spec).not.toHaveAttribute("aria-label", specBefore ?? "");
+
+  const notes = block(page, "Draft Q4 notes");
+  const notesBefore = await notes.getAttribute("aria-label");
+  const notesAt = await center(notes);
+  await dragBy("Draft Q4 notes", notesAt.x, notesAt.y, notesAt.x, notesAt.y + 80);
+  await expect(notes).not.toHaveAttribute("aria-label", notesBefore ?? "");
+
+  const hike = block(page, /^Hike,/);
+  const hikeBefore = await hike.getAttribute("aria-label");
+  const clippedIt = await grid.evaluate((node) => {
+    const target = node.querySelector("[aria-label^='Hike,']");
+    if (!(target instanceof HTMLElement)) return false;
+    const delta = target.getBoundingClientRect().top - node.getBoundingClientRect().top + 28;
+    const max = node.scrollHeight - node.clientHeight;
+    if (delta <= 0 || delta > max) return false;
+    node.scrollTop += delta;
+    return node.scrollTop > 0;
+  });
+  if (clippedIt) {
+    const clipped = await hike.boundingBox();
+    const gridNow = await grid.boundingBox();
+    if (!clipped || !gridNow) throw new Error("hike left the grid");
+    expect(clipped.y).toBeLessThan(gridNow.y + 4);
+    const x = clipped.x + clipped.width / 2;
+    const y = Math.min(gridNow.y + gridNow.height - 24, Math.max(gridNow.y + 16, clipped.y + 20));
+    await dragBy("Hike", x, y, x, y + 60);
+    await expect(hike).not.toHaveAttribute("aria-label", hikeBefore ?? "");
+  }
 });
 
 test("Plan enter keeps the current view", async ({ page }, testInfo) => {
@@ -182,7 +252,7 @@ test("keyboard-only path", async ({ page }) => {
   await expect(page.getByRole("button", { name: "Deny", exact: true })).toBeVisible();
   await focusMatching(/^Deny$/);
   await page.keyboard.press("Enter");
-  await expect(page.getByTestId("plan-toast")).toHaveText("Denied · Budget sheet moved to Unscheduled");
+  await expect(page.getByTestId("plan-toast")).toHaveText("Denied · Budget sheet → Unscheduled");
   await expect(page.getByRole("button", { name: /Budget sheet/ })).toHaveCount(0);
 });
 

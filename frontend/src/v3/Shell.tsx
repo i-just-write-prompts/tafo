@@ -1,4 +1,5 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { flushSync } from "react-dom";
 import { api, reportFailure } from "../api";
 import { PlanActions } from "../plan/actions";
 import { PlanMachine } from "../plan/planMachine";
@@ -85,12 +86,16 @@ interface Preview {
   startHour: number;
 }
 
+interface SettleBox {
+  left: number;
+  top: number;
+  width: number;
+  height: number;
+}
+
 interface Settle {
   id: string;
-  dx: number;
-  dy: number;
-  sx: number;
-  sy: number;
+  park: SettleBox;
   live: boolean;
 }
 
@@ -173,6 +178,7 @@ export function CalendarShell(props: Props) {
   const originRef = useRef<DragOrigin | null>(null);
   const gestureRef = useRef<Gesture>({ phase: "idle" });
   const settleFrom = useRef<{ id: string; left: number; top: number; width: number; height: number } | null>(null);
+  const snapRef = useRef<number | null>(null);
   const [settle, setSettle] = useState<Settle | null>(null);
   const [lockId, setLockId] = useState<string | null>(null);
   const suppressClick = useRef(false);
@@ -201,7 +207,9 @@ export function CalendarShell(props: Props) {
   }, [serverEvents, plan, overrides, timeZone]);
 
   const shown = visibleEvents(baseEvents, filters, overlay?.kind === "search" ? "" : query);
-  const dragPreview = previewFrom(gesture, originRef.current, mode, monday, gridRef.current, width);
+  const dragPreview = previewFrom(gesture, originRef.current, mode, monday, gridRef.current, width, gesture.phase === "lifted" ? snapRef.current : null);
+  if (gesture.phase === "lifted" && dragPreview) snapRef.current = dragPreview.startHour;
+  if (gesture.phase === "idle") snapRef.current = null;
   const events = shown.map((event) => {
     if (!dragPreview || dragPreview.id !== event.id) return event;
     const start = atHour(dragPreview.dayKey, dragPreview.startHour, timeZone);
@@ -293,28 +301,45 @@ export function CalendarShell(props: Props) {
       return;
     }
     const face = gridRef.current?.querySelector(`[data-testid="block-${from.id}"] .face`);
-    if (!(face instanceof HTMLElement)) {
+    const button = face?.parentElement;
+    if (!(face instanceof HTMLElement) || !(button instanceof HTMLElement)) {
       setLockId(null);
       return;
     }
     const next = face.getBoundingClientRect();
-    const sx = next.width > 1 ? from.width / next.width : 1;
-    const sy = next.height > 1 ? from.height / next.height : 1;
-    const dx = from.left - next.left;
-    const dy = from.top - next.top;
-    if (Math.hypot(dx, dy) < 0.5 && Math.abs(sx - 1) < 0.02 && Math.abs(sy - 1) < 0.02) {
+    const buttonRect = button.getBoundingClientRect();
+    const park = {
+      left: from.left - buttonRect.left,
+      top: from.top - buttonRect.top,
+      width: from.width,
+      height: from.height,
+    };
+    const same = Math.hypot(next.left - from.left, next.top - from.top) < 0.5
+      && Math.abs(next.width - from.width) < 0.5
+      && Math.abs(next.height - from.height) < 0.5;
+    if (same) {
       setLockId(null);
       return;
     }
-    setSettle({ id: from.id, dx, dy, sx, sy, live: false });
+    flushSync(() => {
+      setSettle({ id: from.id, park, live: false });
+    });
   });
 
   useLayoutEffect(() => {
     if (!settle || settle.live) return undefined;
-    const frameId = requestAnimationFrame(() => {
-      setSettle((current) => (current && !current.live ? { ...current, live: true } : current));
+    const face = gridRef.current?.querySelector(`[data-testid="block-${settle.id}"] .face`);
+    if (face instanceof HTMLElement) void face.getBoundingClientRect();
+    let second = 0;
+    const first = requestAnimationFrame(() => {
+      second = requestAnimationFrame(() => {
+        setSettle((current) => (current && !current.live ? { ...current, live: true } : current));
+      });
     });
-    return () => cancelAnimationFrame(frameId);
+    return () => {
+      cancelAnimationFrame(first);
+      cancelAnimationFrame(second);
+    };
   }, [settle]);
 
   useEffect(() => {
@@ -322,27 +347,9 @@ export function CalendarShell(props: Props) {
     const timer = window.setTimeout(() => {
       setSettle(null);
       setLockId(null);
-    }, 380);
+    }, 420);
     return () => window.clearTimeout(timer);
   }, [settle]);
-
-  useLayoutEffect(() => {
-    if (!toast || document.documentElement.dataset.frame === "1") return;
-    const kind = overlayRef.current?.kind;
-    if (kind && kind !== "menu" && kind !== "view") return;
-    const grid = gridRef.current;
-    const node = document.querySelector(".v3 .toast");
-    if (!grid || !(node instanceof HTMLElement)) return;
-    const toastRect = node.getBoundingClientRect();
-    let overlap = 0;
-    grid.querySelectorAll(".block, .slim").forEach((block) => {
-      const rect = block.getBoundingClientRect();
-      if (rect.bottom > toastRect.top + 1 && rect.top < toastRect.bottom) {
-        overlap = Math.max(overlap, rect.bottom - toastRect.top);
-      }
-    });
-    if (overlap > 1) grid.scrollTop += overlap + 6;
-  }, [toast, overlay]);
 
   function say(message: string) {
     setLive("");
@@ -482,7 +489,7 @@ export function CalendarShell(props: Props) {
     if (released.phase === "idle") return;
     const event = baseEvents.find((item) => item.id === released.eventId) ?? serverEvents.find((item) => item.id === released.eventId);
     if (!event) return;
-    const preview = previewFrom(released, originRef.current, mode, monday, gridRef.current, width);
+    const preview = previewFrom(released, originRef.current, mode, monday, gridRef.current, width, snapRef.current);
     if (!preview) return;
     const start = atHour(preview.dayKey, preview.startHour, timeZone);
     const end = atHour(preview.dayKey, preview.startHour + (originRef.current?.duration ?? event.endHour - event.startHour), timeZone);
@@ -507,6 +514,7 @@ export function CalendarShell(props: Props) {
       dayIndex: weekKeys.indexOf(event.dayKey),
       dayKey: event.dayKey,
     };
+    snapRef.current = event.startHour;
     const next = gestureDown(pointer.pointerId, event.id, { x: pointer.clientX, y: pointer.clientY }, performance.now());
     gestureRef.current = next;
     setGesture(next);
@@ -516,14 +524,18 @@ export function CalendarShell(props: Props) {
       if (native.pointerId !== pointerId) return;
       const updated = gestureMove(gestureRef.current, { x: native.clientX, y: native.clientY }, performance.now());
       gestureRef.current = updated;
-      setGesture(updated);
+      flushSync(() => setGesture(updated));
     }
     function up(native: PointerEvent) {
       if (native.pointerId !== pointerId) return;
       window.removeEventListener("pointermove", move);
       window.removeEventListener("pointerup", up);
       window.removeEventListener("pointercancel", up);
-      const released = gestureMove(gestureRef.current, { x: native.clientX, y: native.clientY }, performance.now());
+      const current = gestureRef.current;
+      const point = current.phase === "idle"
+        ? { x: native.clientX, y: native.clientY }
+        : current.point;
+      const released = gestureMove(current, point, performance.now());
       const result = gestureUp(released);
       if (result.commit && released.phase === "lifted") {
         suppressClick.current = true;
@@ -910,6 +922,7 @@ function previewFrom(
   monday: string,
   grid: HTMLDivElement | null,
   width: number,
+  previousSnap: number | null,
 ): Preview | null {
   if (gesture.phase !== "lifted" || !origin || !grid) return null;
   const rect = grid.getBoundingClientRect();
@@ -923,6 +936,7 @@ function previewFrom(
     gutter: mode === "day" ? DAY_GUTTER : WEEK_GUTTER,
     columnWidth: mode === "day" ? width : weekColumnWidth(width),
     allowDayChange: mode === "week",
+    previousSnap,
   });
   if (Math.hypot(gesture.point.x - gesture.origin.x, gesture.point.y - gesture.origin.y) < COMMIT_PX) return null;
   return {
@@ -1004,12 +1018,19 @@ function PlanBanner(props: {
 }
 
 function settleMotion(settle: Settle | null, id: string): { className: string; style: React.CSSProperties } {
-  if (!settle || settle.id !== id) return { className: "", style: {} };
+  if (!settle || settle.id !== id || settle.live) {
+    return { className: settle?.id === id && settle.live ? "settling live" : "", style: {} };
+  }
   return {
-    className: settle.live ? "settling live" : "settling",
+    className: "settling",
     style: {
-      transformOrigin: "top left",
-      transform: settle.live ? "translate(0px, 0px) scale(1, 1)" : `translate(${settle.dx}px, ${settle.dy}px) scale(${settle.sx}, ${settle.sy})`,
+      position: "absolute",
+      left: settle.park.left,
+      top: settle.park.top,
+      width: settle.park.width,
+      height: settle.park.height,
+      right: "auto",
+      bottom: "auto",
     },
   };
 }
@@ -1200,7 +1221,7 @@ function WeekCanvas(props: {
   }));
   const boxes = weekBoxes(timed, props.width);
   const markY = props.drag ? weekY(props.drag.startHour) : null;
-  const titlePx = props.width > 0 && weekColumnWidth(props.width) < 52 ? 10.5 : 11;
+  const titlePx = 11;
   const measure = (value: string) => {
     const canvas = measureCanvas(titlePx);
     return canvas ? canvas.measureText(value).width : value.length * (titlePx * 0.55);
@@ -1267,7 +1288,7 @@ function WeekCanvas(props: {
             >
               {event.state === "approved" ? <i className="bar" style={{ background: line(event.domain) }} /> : null}
               {event.state === "proposed" ? <i className="dash" /> : null}
-              <span className="body" style={{ inset: "2px 4px 2px 6px", justifyContent: "flex-start" }}>
+              <span className="body" style={{ inset: "2px 1px 2px 4px", justifyContent: "flex-start" }}>
                 {lines.lines.map((lineText) => (
                   <strong key={lineText} className="week-title">{lineText}</strong>
                 ))}
