@@ -48,7 +48,9 @@ describe("v3 clock copy", () => {
   });
 
   it("keeps proposals out of Mike's move count", () => {
-    expect(bannerText(0, 2, true)).toBe("Drag blocks · nothing saves until Review");
+    expect(bannerText(0, 0, true)).toBe("Drag blocks · nothing saves until Review");
+    expect(bannerText(0, 2, true)).toBe("Agent suggests 2");
+    expect(bannerText(0, 1, false)).toBe("Agent suggests 1");
     expect(bannerText(4, 1, false)).toBe("4 moves · agent suggests 1");
     expect(bannerText(1, 0, true)).toBe("1 move · unsaved");
     expect(approveLabel(4, 1)).toBe("Approve all · 4 moves + 1 proposal");

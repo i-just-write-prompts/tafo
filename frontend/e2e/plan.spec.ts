@@ -416,7 +416,8 @@ test("Plan mode shows Review and Approve all for agent suggestions alone", async
   const closet = before.proposals.find((item) => item.kind === "calendar_block" && before.tasks.some((task) => task.id === item.payload.task_id && task.title === "Fix closet door"));
   if (!budget || !closet) throw new Error("suggestions missing");
   await press(page.getByRole("button", { name: "Plan mode" }), testInfo.project.name);
-  await expect(page.getByTestId("plan-banner")).toContainText("nothing saves until Review");
+  await expect(page.getByTestId("plan-banner")).toContainText("Agent suggests 2");
+  await expect(page.getByTestId("plan-banner")).not.toContainText("nothing saves until Review");
   await expect(page.getByRole("button", { name: "Review", exact: true })).toBeVisible();
   await press(page.getByRole("button", { name: "Review", exact: true }), testInfo.project.name);
   const approve = page.getByRole("button", { name: "Approve all · 2 proposals" });
@@ -437,8 +438,8 @@ test("Plan mode shows Review and Approve all for agent suggestions alone", async
 
 test("Plan enter keeps the current view", async ({ page }, testInfo) => {
   await press(page.getByTestId("plan-button"), testInfo.project.name);
-  await expect(page.getByTestId("plan-banner")).toContainText("Drag blocks");
-  await expect(page.getByTestId("plan-banner")).toContainText("nothing saves until Review");
+  await expect(page.getByTestId("plan-banner")).toContainText("Agent suggests 2");
+  await expect(page.getByTestId("plan-banner")).not.toContainText("nothing saves until Review");
   await expect(page.locator(".v3")).toHaveAttribute("data-mode", "day");
   await expect(page.getByTestId("day-grid")).toBeVisible();
   await expect(page.getByTestId("week-grid")).toHaveCount(0);

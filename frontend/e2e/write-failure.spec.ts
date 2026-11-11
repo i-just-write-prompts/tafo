@@ -1,7 +1,7 @@
 /* Forced-write failures for every approval path.
    Sync: a refused write is not "saved", and it is not stranded.
    Proposals: an approved suggestion with no block stays visible, including after Revert all. */
-import { expect, test, type Page } from "@playwright/test";
+import { expect, test, type Locator, type Page } from "@playwright/test";
 
 import { armWriteFailure, checkSaveClaim, readCalendar, type CalendarBlockRow, type ProposalRow } from "./helpers/saveClaim";
 import { block, center, dragHold, openDay, press, reseed } from "./support";
@@ -52,10 +52,23 @@ async function dragTitle(page: Page, project: string, title: string, dy: number)
   await uiDrag(page, project, at.x, at.y, at.x, at.y + dy);
 }
 
-async function statusFits(page: Page, status: RegExp | string) {
-  const keep = page.locator("[data-testid=toast-keep]");
+async function statusFits(page: Page, status: RegExp | string, target?: Locator) {
+  const keep = target ?? page.locator("[data-testid=toast-keep]");
   await expect(keep).toBeVisible();
   await expect(keep).toHaveText(status);
+  if (target) {
+    const fit = await target.evaluate((el) => {
+      const node = el as HTMLElement;
+      return {
+        sw: node.scrollWidth,
+        cw: node.clientWidth,
+        lines: node.getClientRects().length,
+      };
+    });
+    expect(fit.lines, "status stays on one line").toBe(1);
+    expect(fit.sw, "status is fully visible").toBeLessThanOrEqual(fit.cw + 1);
+    return { nameOverflow: "", tailOverflow: "", nameClipped: false, tailClipped: false };
+  }
   const clip = await keep.evaluate((el) => {
     const node = el as HTMLElement;
     return { sw: node.scrollWidth, cw: node.clientWidth, sh: node.parentElement?.scrollHeight ?? 0, ch: node.parentElement?.clientHeight ?? 0 };
@@ -352,7 +365,7 @@ test("a single Approve toast has no Undo", async ({ page }, testInfo) => {
   await expect(toast).toBeVisible();
   expect(await toast.getByRole("button", { name: "Undo" }).count()).toBe(0);
   expect(await toast.getByRole("button", { name: "Retry" }).count()).toBe(0);
-  await checkSaveClaim(page, {
+  const text = await checkSaveClaim(page, {
     case: "matches-server",
     toast,
     includes: ["Approved Fix closet door"],
@@ -360,6 +373,7 @@ test("a single Approve toast has no Undo", async ({ page }, testInfo) => {
     proposals: [{ id: closet.id, status: "approved" }],
     blocks: [{ taskTitle: "Fix closet door", starts_at: closet.payload.starts_at || "", ends_at: closet.payload.ends_at || "" }],
   });
+  expect(text).toBe("Approved Fix closet door");
 });
 
 test("an Approve all toast has no Undo", async ({ page }, testInfo) => {
@@ -458,6 +472,14 @@ test("approve-after-conflict toast fits on one line with changed visible", async
   });
   await expect(page.locator("[data-testid=plan-toast] .toast-icon")).toHaveAttribute("data-icon", "info");
   await statusFits(page, /changed/);
+});
+
+test("suggestion-only banner names the count and fits", async ({ page }, testInfo) => {
+  test.skip(testInfo.project.name === "desktop", "phone widths own the fit check");
+  await press(page.getByRole("button", { name: "Plan mode" }), testInfo.project.name);
+  const line = page.getByTestId("plan-banner").locator(".banner-copy p");
+  await statusFits(page, "Agent suggests 2", line);
+  await expect(page.getByTestId("plan-banner")).not.toContainText("nothing saves until Review");
 });
 
 test("compact conflict line fits and Review carries the name", async ({ page }, testInfo) => {
