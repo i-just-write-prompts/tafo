@@ -85,6 +85,7 @@ test("PR1 a refused quick drag stays visible with Retry", async ({ page }, testI
     proposals: [{ id: budget.id, status: "approved" }],
     retry: async () => {
       await expect(page.locator("[data-testid=plan-toast]").getByRole("button", { name: "Retry" })).toBeVisible();
+      expect(await page.locator("[data-testid=plan-toast]").getByRole("button", { name: "Undo" }).count()).toBe(0);
       await expect(page.locator("[data-testid=plan-toast]")).toHaveCount(0, { timeout: 6000 });
       const marker = page.getByRole("button", { name: /Budget sheet/ });
       await expect(marker).toHaveAttribute("aria-label", /Not on calendar/);
@@ -119,6 +120,7 @@ test("decide a refused Approve stays visible with Retry", async ({ page }, testI
     proposals: [{ id: budget.id, status: "approved" }],
     retry: async () => {
       await expect(page.locator("[data-testid=plan-toast]").getByRole("button", { name: "Retry" })).toBeVisible();
+      expect(await page.locator("[data-testid=plan-toast]").getByRole("button", { name: "Undo" }).count()).toBe(0);
       await expect(page.locator("[data-testid=plan-toast]")).toHaveCount(0, { timeout: 6000 });
       const marker = page.getByRole("button", { name: /Budget sheet/ });
       await expect(marker).toHaveAttribute("aria-label", /Not on calendar/);
@@ -153,6 +155,7 @@ test("Approve all a refused proposal shows Retry and stays visible", async ({ pa
     proposals: [{ id: budget.id, status: "approved" }],
     retry: async () => {
       await expect(page.locator("[data-testid=plan-toast]").getByRole("button", { name: "Retry" })).toBeVisible();
+      expect(await page.locator("[data-testid=plan-toast]").getByRole("button", { name: "Undo" }).count()).toBe(0);
       await expect(page.locator("[data-testid=plan-toast]")).toHaveCount(0, { timeout: 6000 });
       const marker = page.getByRole("button", { name: /Budget sheet/ });
       await expect(marker).toHaveAttribute("aria-label", /Not on calendar/);
@@ -245,13 +248,15 @@ test("after a failed approve, Revert all keeps Not on calendar with Retry", asyn
   });
 });
 
-test("Undo after dragging a Proposed block reverts the approval and the block", async ({ page }, testInfo) => {
+test("a Proposed quick drag toast has no Undo", async ({ page }, testInfo) => {
   const before = await readCalendar(page);
   const budget = proposalNamed(before, "Budget sheet");
   const taskId = budget.payload.task_id || "";
   await dragTitle(page, testInfo.project.name, "Budget sheet", 60);
   const toast = page.getByTestId("plan-toast");
   await expect(toast).toBeVisible();
+  await expect(toast).toContainText("→");
+  expect(await toast.getByRole("button", { name: "Undo" }).count()).toBe(0);
   const saved = await readCalendar(page);
   const landed = scheduledFor(saved.blocks, taskId);
   if (!landed) throw new Error("the drag did not create a block");
@@ -263,11 +268,53 @@ test("Undo after dragging a Proposed block reverts the approval and the block", 
     proposals: [{ id: budget.id, status: "approved" }],
     blocks: [{ taskTitle: "Budget sheet", starts_at: landed.starts_at, ends_at: landed.ends_at }],
   });
-  await press(page.getByRole("button", { name: "Undo" }), testInfo.project.name);
-  await expect(block(page, "Budget sheet")).toHaveAttribute("aria-label", /Proposed/);
+  await expect(toast).toHaveCount(0, { timeout: 6000 });
+  await expect(block(page, "Budget sheet")).toBeVisible();
   const after = await readCalendar(page);
-  expect(after.proposals.find((item) => item.id === budget.id)?.status).toBe("pending");
-  expect(scheduledFor(after.blocks, taskId)).toBeUndefined();
+  expect(after.proposals.find((item) => item.id === budget.id)?.status).toBe("approved");
+  expect(scheduledFor(after.blocks, taskId)?.starts_at).toBe(landed.starts_at);
+});
+
+test("a single Approve toast has no Undo", async ({ page }, testInfo) => {
+  const before = await readCalendar(page);
+  const closet = proposalNamed(before, "Fix closet door");
+  await press(block(page, "Fix closet door"), testInfo.project.name);
+  await press(page.getByRole("button", { name: "Approve", exact: true }), testInfo.project.name);
+  const toast = page.getByTestId("plan-toast");
+  await expect(toast).toContainText("Approved");
+  expect(await toast.getByRole("button", { name: "Undo" }).count()).toBe(0);
+  expect(await toast.getByRole("button", { name: "Retry" }).count()).toBe(0);
+  await checkSaveClaim(page, {
+    case: "matches-server",
+    toast,
+    includes: ["Approved Fix closet door"],
+    excludes: ["not on calendar"],
+    proposals: [{ id: closet.id, status: "approved" }],
+    blocks: [{ taskTitle: "Fix closet door", starts_at: closet.payload.starts_at || "", ends_at: closet.payload.ends_at || "" }],
+  });
+});
+
+test("an Approve all toast has no Undo", async ({ page }, testInfo) => {
+  const before = await readCalendar(page);
+  const budget = proposalNamed(before, "Budget sheet");
+  const closet = proposalNamed(before, "Fix closet door");
+  await press(page.getByRole("button", { name: "Plan mode" }), testInfo.project.name);
+  await dragTitle(page, testInfo.project.name, "Call vendor", 60);
+  await press(page.getByRole("button", { name: "Review", exact: true }), testInfo.project.name);
+  await press(page.getByTestId("approve-all"), testInfo.project.name);
+  const toast = page.getByTestId("plan-toast");
+  await expect(toast).toContainText("Approved");
+  expect(await toast.getByRole("button", { name: "Undo" }).count()).toBe(0);
+  await checkSaveClaim(page, {
+    case: "matches-server",
+    toast,
+    includes: [/Approved/],
+    excludes: ["not on calendar"],
+    proposals: [
+      { id: budget.id, status: "approved" },
+      { id: closet.id, status: "approved" },
+    ],
+  });
 });
 
 test("revert toast fits on one line with the status visible", async ({ page }, testInfo) => {
