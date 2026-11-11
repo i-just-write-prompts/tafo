@@ -1938,7 +1938,7 @@ function EventSheet(props: {
       </button>
       {event.explanation ? <p className="why">Why: {event.explanation}</p> : null}
       {event.state === "unplaced" ? (
-        <button type="button" className="yes" data-testid="unplaced-retry" onClick={() => props.onRetry(event)}>Retry</button>
+        <button type="button" className="quiet" data-testid="unplaced-retry" onClick={() => props.onRetry(event)}>Retry</button>
       ) : null}
       {event.state === "proposed" ? (
         <div className="pair">
