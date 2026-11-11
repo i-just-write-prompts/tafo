@@ -546,23 +546,7 @@ export function CalendarShell(props: Props) {
           return;
         }
         const hour = withMove(event, startIso, endIso, timeZone).startHour;
-        const approved = saved.proposal;
-        pushToast(quickToast(event.title, hour), approved ? async () => {
-          try {
-            await api(`/api/decisions/${approved.id}/undo`, {
-              method: "POST",
-              body: JSON.stringify({ expected_version: approved.version, confirmed: true }),
-            });
-            setOverrides((current) => {
-              const copy = { ...current };
-              delete copy[event.id];
-              return copy;
-            });
-            await propsRef.current.onRefresh();
-          } catch (error) {
-            await fail(error);
-          }
-        } : undefined);
+        pushToast(quickToast(event.title, hour));
       } else {
         const block = propsRef.current.blocks.find((item) => item.id === event.id);
         if (!block) return;
