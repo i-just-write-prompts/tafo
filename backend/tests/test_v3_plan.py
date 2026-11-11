@@ -655,8 +655,8 @@ def test_commit_refuses_an_empty_plan(tmp_path):
         client.__exit__(None, None, None)
 
 
-def test_undo_of_a_proposed_drag_reverts_the_approval_and_the_block(tmp_path):
-    """PR1 Undo must leave the suggestion pending and take the new block off the calendar."""
+def test_undo_of_an_approval_is_refused_and_leaves_state_unchanged(tmp_path):
+    """Approving a suggestion cannot be undone. The proposal and its block stay as they are."""
     client = open_week(tmp_path)
     try:
         budget = proposal_named(client, "Budget sheet")
@@ -675,11 +675,73 @@ def test_undo_of_a_proposed_drag_reverts_the_approval_and_the_block(tmp_path):
             f"/api/decisions/{budget['id']}/undo",
             json={"expected_version": proposal["version"], "confirmed": True},
         )
-        assert undone.status_code == 200, undone.text
+        assert undone.status_code == 409, undone.text
         again = proposal_named(client, "Budget sheet")
-        assert again["status"] == "pending"
-        assert again["edited_payload"] is None
+        assert again["status"] == "approved"
+        assert again["version"] == proposal["version"]
+        assert again["edited_payload"] == proposal.get("edited_payload")
         after = client.get("/api/calendar/blocks").json()["blocks"]
-        assert [row for row in after if row["task_id"] == task_id and row["status"] == "scheduled"] == []
+        still = next(row for row in after if row["id"] == landed[0]["id"])
+        assert still["status"] == "scheduled"
+        assert still["starts_at"] == landed[0]["starts_at"]
+        assert still["ends_at"] == landed[0]["ends_at"]
+        assert still["version"] == landed[0]["version"]
+    finally:
+        client.__exit__(None, None, None)
+
+
+def test_undo_of_an_unsynced_approval_does_not_cancel_other_blocks(tmp_path):
+    """A refused undo must not cancel a different block that shares the task."""
+    import sqlite3
+
+    client = open_week(tmp_path, e2e=True)
+    try:
+        budget = proposal_named(client, "Budget sheet")
+        task_id = budget["payload"]["task_id"]
+        armed = client.post("/api/e2e/fail-writes", json={"event_keys": [], "fail_creates": 1})
+        assert armed.status_code == 200, armed.text
+        now = "2026-11-10T15:40:00Z"
+        with sqlite3.connect(tmp_path / "tafo.sqlite") as conn:
+            conn.execute(
+                """
+                INSERT INTO calendar_blocks (
+                  id, task_id, origin_proposal_id, title, description, starts_at, ends_at, domain,
+                  invite_work_email, fixed, status, sync_state, written_mode, honest_label,
+                  google_event_id, version, created_at, updated_at
+                ) VALUES (?, ?, NULL, ?, '', ?, ?, 'work', 0, 0, 'scheduled', 'simulated', 'demo', ?, NULL, 1, ?, ?)
+                """,
+                (
+                    "blk_probe_other",
+                    task_id,
+                    "Other session",
+                    "2026-11-10T18:00:00Z",
+                    "2026-11-10T19:00:00Z",
+                    "Simulated dry-run. NOT synced to Google Calendar. No invitation was sent.",
+                    now,
+                    now,
+                ),
+            )
+        approved = client.post(
+            f"/api/decisions/{budget['id']}/approve",
+            json={"expected_version": budget["version"], "confirmed": True},
+        )
+        assert approved.status_code == 200, approved.text
+        proposal = approved.json()["proposal"]
+        assert proposal["status"] == "approved"
+        assert approved.json()["block"] is None
+        undone = client.post(
+            f"/api/decisions/{budget['id']}/undo",
+            json={"expected_version": proposal["version"], "confirmed": True},
+        )
+        assert undone.status_code == 409, undone.text
+        again = proposal_named(client, "Budget sheet")
+        assert again["status"] == "approved"
+        assert again["version"] == proposal["version"]
+        after = client.get("/api/calendar/blocks").json()["blocks"]
+        other = next(row for row in after if row["id"] == "blk_probe_other")
+        assert other["status"] == "scheduled"
+        assert other["starts_at"] == "2026-11-10T18:00:00Z"
+        cancelled = [row for row in after if row["task_id"] == task_id and row["status"] == "cancelled"]
+        assert cancelled == []
     finally:
         client.__exit__(None, None, None)

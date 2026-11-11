@@ -87,6 +87,7 @@ export interface Proposal {
 export interface CalendarBlock {
   id: string;
   task_id: string | null;
+  origin_proposal_id?: string | null;
   title: string;
   description: string;
   starts_at: string;

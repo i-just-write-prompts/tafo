@@ -117,6 +117,30 @@ describe("calendar events", () => {
       start: "2026-11-10T19:00:00Z",
     });
     expect(visibleEvents(events, { ...ALL_SHOWN, proposals: false }, "").map((event) => event.id)).toEqual(["prp-budget"]);
+    const sharing = buildEvents(
+      tasks,
+      [block({ id: "evt-other", task_id: "task-budget", title: "Other session", starts_at: "2026-11-10T21:00:00Z", ends_at: "2026-11-10T22:00:00Z" })],
+      proposals,
+      zone,
+      [{ id: "obx-budget", proposal_id: "prp-budget", status: "failed", operation: "create", event_key: "evt-budget" }],
+    );
+    expect(sharing.find((event) => event.id === "prp-budget")?.state).toBe("unplaced");
+    expect(sharing.map((event) => event.id).sort()).toEqual(["evt-other", "prp-budget"]);
+    const own = buildEvents(
+      tasks,
+      [block({
+        id: "evt-budget",
+        task_id: "task-budget",
+        title: "Budget sheet",
+        starts_at: "2026-11-10T19:00:00Z",
+        ends_at: "2026-11-10T20:30:00Z",
+        origin_proposal_id: "prp-budget",
+      })],
+      proposals,
+      zone,
+      [{ id: "obx-budget", proposal_id: "prp-budget", status: "failed", operation: "create", event_key: "evt-different" }],
+    );
+    expect(own.map((event) => event.state)).toEqual(["approved"]);
     const landed = buildEvents(
       tasks,
       [block({ id: "evt-budget", task_id: "task-budget", title: "Budget sheet", starts_at: "2026-11-10T19:00:00Z", ends_at: "2026-11-10T20:30:00Z" })],
