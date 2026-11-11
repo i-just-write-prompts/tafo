@@ -215,6 +215,7 @@ body { margin: 0; background: #0a0b0d; }
   font-size: 15px;
   font-weight: 500;
 }
+.banner-actions button { padding: 0 10px; }
 .ghost-btn { border: 1px solid #4a4e56; }
 .solid-btn { background: var(--t1); color: #0a0b0d; font-weight: 600; }
 .tag {

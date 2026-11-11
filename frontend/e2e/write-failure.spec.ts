@@ -513,7 +513,7 @@ test("compact conflict line fits and Review carries the name", async ({ page }, 
   }
   await press(page.getByRole("button", { name: "Review", exact: true }), testInfo.project.name);
   await expect(page.getByTestId("changed-tag")).toHaveText("Changed");
-  await expect(page.locator("[data-testid^=plan-item-]")).toContainText("Spec review");
+  await expect(page.getByTestId(`plan-item-${spec.id}`)).toContainText("Spec review");
 });
 
 async function blockAt(page: Page, x: number, y: number): Promise<string | null> {

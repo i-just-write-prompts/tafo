@@ -39,6 +39,7 @@ import {
   compactConflict,
   partialPlanToast,
   clock,
+  clockMinutes,
   dayName,
   dayTitle,
   denyToast,
@@ -1704,8 +1705,8 @@ function EventButton(props: {
         <span className="body">
           {event.state === "done" ? <span className="done-check"><CheckGlyph /></span> : null}
           <strong>{event.title}</strong>
-          {one && !(props.lifted && box.w < 200) ? <span>{event.state === "unplaced" ? "Not on calendar" : time}</span> : null}
-          {!one ? <span>{event.state === "unplaced" ? "Not on calendar" : `${time}${event.state === "proposed" ? " · Proposed" : ""}`}</span> : null}
+          {one && !(props.lifted && box.w < 200) ? <span>{event.state === "unplaced" ? `${clockMinutes(event.startHour)} · Not on calendar` : time}</span> : null}
+          {!one ? <span>{event.state === "unplaced" ? `${clockMinutes(event.startHour)} · Not on calendar` : `${time}${event.state === "proposed" ? " · Proposed" : ""}`}</span> : null}
         </span>
       </span>
       {event.state === "proposed" ? (
@@ -2006,7 +2007,7 @@ function ReviewSheet(props: {
               <small style={{ display: "block", color: "var(--t2)" }}>{dayName(from.dayKey)} {clock(from.startHour)} → {dayName(to.dayKey)} {clock(to.startHour)}</small>
             </span>
             {crosses ? <span className="tag">Crosses work hours</span> : null}
-            {props.conflicts.includes(move.id) ? <span className="tag" data-testid="changed-tag">Changed · {event.title}</span> : null}
+            {props.conflicts.includes(move.id) ? <span className="tag" data-testid="changed-tag">Changed</span> : null}
           </div>
         );
       })}
