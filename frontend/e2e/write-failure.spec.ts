@@ -573,26 +573,37 @@ async function doubleTapApprove(page: Page, project: string, gap: number) {
   await press(page.getByRole("button", { name: "Plan mode" }), project);
   await dragTitle(page, project, "Call vendor", 60);
   await press(page.getByRole("button", { name: "Review", exact: true }), project);
-  const first = await placeApproveOverGrid(page);
-  await press(page.getByRole("button", { name: "Keep planning" }), project);
-  await expect(page.getByTestId("review-sheet")).toHaveCount(0);
-  await seedBlockUnderApprove(page, first.x, first.y);
-  expect(await blockAt(page, first.x, first.y), "a block sits under Approve all").toBeTruthy();
-  await press(page.getByRole("button", { name: "Review", exact: true }), project);
-  const point = await placeApproveOverGrid(page);
-  expect(Math.abs(point.x - first.x)).toBeLessThan(4);
-  expect(Math.abs(point.y - first.y)).toBeLessThan(8);
-  await page.evaluate(() => {
-    const store = window as unknown as { __ghost?: number };
-    store.__ghost = 0;
-    document.addEventListener("click", (event) => {
-      const target = event.target;
-      if (!(target instanceof Element) || !target.closest(".block")) return;
-      window.setTimeout(() => {
-        if (!event.defaultPrevented) store.__ghost = (store.__ghost || 0) + 1;
-      }, 0);
-    }, true);
-  });
+  // No block under Approve all in the phone layout, per Verifier 350db59 note 1.
+  const seedGhost = project !== "phone";
+  let point: { x: number; y: number };
+  if (seedGhost) {
+    const first = await placeApproveOverGrid(page);
+    await press(page.getByRole("button", { name: "Keep planning" }), project);
+    await expect(page.getByTestId("review-sheet")).toHaveCount(0);
+    await seedBlockUnderApprove(page, first.x, first.y);
+    expect(await blockAt(page, first.x, first.y), "a block sits under Approve all").toBeTruthy();
+    await press(page.getByRole("button", { name: "Review", exact: true }), project);
+    point = await placeApproveOverGrid(page);
+    expect(Math.abs(point.x - first.x)).toBeLessThan(4);
+    expect(Math.abs(point.y - first.y)).toBeLessThan(8);
+    await page.evaluate(() => {
+      const store = window as unknown as { __ghost?: number };
+      store.__ghost = 0;
+      document.addEventListener("click", (event) => {
+        const target = event.target;
+        if (!(target instanceof Element) || !target.closest(".block")) return;
+        window.setTimeout(() => {
+          if (!event.defaultPrevented) store.__ghost = (store.__ghost || 0) + 1;
+        }, 0);
+      }, true);
+    });
+  } else {
+    const approve = page.getByTestId("approve-all");
+    await approve.scrollIntoViewIfNeeded();
+    const box = await approve.boundingBox();
+    if (!box) throw new Error("approve missing");
+    point = { x: box.x + box.width / 2, y: box.y + box.height / 2 };
+  }
   const hit = await page.evaluate(({ px, py }) => {
     const el = document.elementFromPoint(px, py);
     return Boolean(el && el.closest("[data-testid='approve-all']"));
@@ -603,6 +614,7 @@ async function doubleTapApprove(page: Page, project: string, gap: number) {
   await page.touchscreen.tap(point.x, point.y);
   await page.waitForTimeout(1000);
   expect(commits).toBe(1);
+  if (!seedGhost) return;
   const ghost = await page.evaluate(() => (window as unknown as { __ghost?: number }).__ghost || 0);
   if (gap >= 700) {
     await expect(page.getByRole("dialog")).toBeVisible();
