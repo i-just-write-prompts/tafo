@@ -62,6 +62,21 @@ async function statusFits(page: Page, status: RegExp | string) {
   });
   expect(clip.sw).toBeLessThanOrEqual(clip.cw + 1);
   expect(clip.sh).toBeLessThanOrEqual(clip.ch + 1);
+  const parts = await keep.evaluate((el) => {
+    const line = el.parentElement;
+    const name = line?.querySelector(".partial-name") as HTMLElement | null;
+    const tail = el as HTMLElement;
+    return {
+      nameOverflow: name ? getComputedStyle(name).textOverflow : "",
+      tailOverflow: getComputedStyle(tail).textOverflow,
+      nameClipped: Boolean(name && name.scrollWidth > name.clientWidth + 1),
+      tailClipped: tail.scrollWidth > tail.clientWidth + 1,
+    };
+  });
+  expect(parts.nameOverflow).toBe("ellipsis");
+  expect(parts.tailOverflow).not.toBe("ellipsis");
+  expect(parts.tailClipped).toBe(false);
+  return parts;
 }
 
 test("PR1 a refused quick drag stays visible with Retry", async ({ page }, testInfo) => {
@@ -270,6 +285,38 @@ test("Not on calendar Retry is a full-width secondary button", async ({ page }, 
   expect(paint).not.toBe("transparent");
 });
 
+test("an unplaced marker keeps its time and is not listed twice", async ({ page }, testInfo) => {
+  await expect(page.getByTestId("unscheduled")).toHaveText(/Unscheduled\s*4/);
+  await armWriteFailure(page, [], 1);
+  await dragTitle(page, testInfo.project.name, "Budget sheet", 60);
+  await expect(page.locator("[data-testid=plan-toast]")).toHaveCount(0, { timeout: 6000 });
+  const marker = page.getByRole("button", { name: /Budget sheet/ });
+  await expect(marker).toContainText("3:00 PM · Not on calendar");
+  await expect(page.getByTestId("unscheduled")).toHaveText(/Unscheduled\s*4/);
+});
+
+test("only the event name ellipsizes on a not-on-calendar toast", async ({ page }, testInfo) => {
+  test.skip(testInfo.project.name === "desktop", "phone widths own the fit check");
+  const before = await readCalendar(page);
+  const budget = proposalNamed(before, "Budget sheet");
+  const renamed = await page.evaluate(async (id) => {
+    const response = await fetch(`/api/tasks/${id}`, {
+      method: "PATCH",
+      credentials: "same-origin",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ expected_version: 1, title: "Quarterly budget planning worksheet for the board" }),
+    });
+    return { ok: response.ok, text: await response.text() };
+  }, budget.payload.task_id);
+  expect(renamed.ok, renamed.text).toBeTruthy();
+  await page.reload();
+  await expect(page.getByRole("heading", { name: "Tue, Nov 10" })).toBeVisible();
+  await armWriteFailure(page, [], 1);
+  await dragTitle(page, testInfo.project.name, "Quarterly budget", 60);
+  const parts = await statusFits(page, /not on calendar/);
+  expect(parts.nameClipped, "the long name is the part that ellipsizes").toBe(true);
+});
+
 test("a Proposed quick drag toast has no Undo", async ({ page }, testInfo) => {
   const before = await readCalendar(page);
   const budget = proposalNamed(before, "Budget sheet");
@@ -397,7 +444,7 @@ test("approve-after-conflict toast fits on one line with changed visible", async
   await page.reload();
   await expect(page.getByTestId("plan-banner")).toBeVisible();
   await press(page.getByRole("button", { name: "Review", exact: true }), testInfo.project.name);
-  await expect(page.getByTestId("changed-tag")).toContainText("Spec review");
+  await expect(page.getByTestId("changed-tag")).toHaveText("Changed");
   await press(page.getByTestId("approve-all"), testInfo.project.name);
   await checkSaveClaim(page, {
     case: "matches-server",
@@ -455,8 +502,18 @@ test("compact conflict line fits and Review carries the name", async ({ page }, 
   });
   expect(fit.sw).toBeLessThanOrEqual(fit.cw + 1);
   expect(fit.text.toLowerCase()).toContain("changed");
+  if (!narrow) {
+    const moveLine = page.locator(".banner-copy p").first();
+    await expect(moveLine).toHaveText("1 move · agent suggests 2");
+    const moveFit = await moveLine.evaluate((el) => {
+      const node = el as HTMLElement;
+      return { sw: node.scrollWidth, cw: node.clientWidth };
+    });
+    expect(moveFit.sw, "1 move · agent suggests 2 fits at 390").toBeLessThanOrEqual(moveFit.cw + 1);
+  }
   await press(page.getByRole("button", { name: "Review", exact: true }), testInfo.project.name);
-  await expect(page.getByTestId("changed-tag")).toContainText("Spec review");
+  await expect(page.getByTestId("changed-tag")).toHaveText("Changed");
+  await expect(page.locator("[data-testid^=plan-item-]")).toContainText("Spec review");
 });
 
 async function blockAt(page: Page, x: number, y: number): Promise<string | null> {

@@ -1104,7 +1104,7 @@ test("R4 client skips a Changed move and keeps the newer time", async ({ page },
     if (request.method() === "POST" && request.url().includes("/api/decisions/plan/commit")) posts.push(request.postData() || "");
   });
   await press(page.getByRole("button", { name: "Review", exact: true }), testInfo.project.name);
-  await expect(page.getByTestId("changed-tag")).toContainText("Spec review");
+  await expect(page.getByTestId("changed-tag")).toHaveText("Changed");
   await press(page.getByRole("button", { name: /Approve all/ }), testInfo.project.name);
   await checkSaveClaim(page, {
     case: "matches-server",
@@ -1383,7 +1383,7 @@ test("R2 a stale draft does not overwrite a newer block", async ({ page }, testI
   if (testInfo.project.name === "s23") {
     await expect(page.getByTestId("plan-conflict")).toHaveText("1 changed");
     await press(page.getByRole("button", { name: "Review", exact: true }), testInfo.project.name);
-    await expect(page.getByTestId("changed-tag")).toContainText("Spec review");
+    await expect(page.getByTestId("changed-tag")).toHaveText("Changed");
   } else {
     await expect(page.getByTestId("plan-conflict")).toContainText("Changed · Spec review");
   }
