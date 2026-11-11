@@ -54,6 +54,7 @@ describe("v3 clock copy", () => {
     expect(approveLabel(4, 1)).toBe("Approve all · 4 moves + 1 proposal");
     expect(approveLabel(4, 0)).toBe("Approve all · 4 moves");
     expect(approveLabel(1, 2)).toBe("Approve all · 1 move + 2 proposals");
+    expect(approveLabel(0, 2)).toBe("Approve all · 2 proposals");
     expect(approvedToast(4, 1)).toBe("Approved 4 moves + 1 proposal");
     expect(approvedToast(0, 2, ["Spec review"])).toBe("Approved 2 · Spec review changed");
     expect(approvedToast(1, 0)).toBe("Approved 1 move");

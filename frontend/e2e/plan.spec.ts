@@ -410,6 +410,31 @@ test("Monday approval does not include other days' proposals", async ({ page }, 
   await expect(page.getByText("Fix closet door")).toHaveCount(0);
 });
 
+test("Plan mode shows Review and Approve all for agent suggestions alone", async ({ page }, testInfo) => {
+  const before = await readCalendar(page);
+  const budget = before.proposals.find((item) => item.kind === "calendar_block" && before.tasks.some((task) => task.id === item.payload.task_id && task.title === "Budget sheet"));
+  const closet = before.proposals.find((item) => item.kind === "calendar_block" && before.tasks.some((task) => task.id === item.payload.task_id && task.title === "Fix closet door"));
+  if (!budget || !closet) throw new Error("suggestions missing");
+  await press(page.getByRole("button", { name: "Plan mode" }), testInfo.project.name);
+  await expect(page.getByTestId("plan-banner")).toContainText("nothing saves until Review");
+  await expect(page.getByRole("button", { name: "Review", exact: true })).toBeVisible();
+  await press(page.getByRole("button", { name: "Review", exact: true }), testInfo.project.name);
+  const approve = page.getByRole("button", { name: "Approve all · 2 proposals" });
+  await expect(approve).toBeVisible();
+  await press(approve, testInfo.project.name);
+  await checkSaveClaim(page, {
+    case: "matches-server",
+    toast: page.getByTestId("plan-toast"),
+    includes: [/Approved/],
+    excludes: ["Undo"],
+    proposals: [
+      { id: budget.id, status: "approved" },
+      { id: closet.id, status: "approved" },
+    ],
+  });
+  expect(await page.getByTestId("plan-toast").getByRole("button", { name: "Undo" }).count()).toBe(0);
+});
+
 test("Plan enter keeps the current view", async ({ page }, testInfo) => {
   await press(page.getByTestId("plan-button"), testInfo.project.name);
   await expect(page.getByTestId("plan-banner")).toContainText("Drag blocks");
