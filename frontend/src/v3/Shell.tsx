@@ -1045,7 +1045,7 @@ export function CalendarShell(props: Props) {
           );
           return;
         }
-        pushToast(`Approved ${event.title}.`);
+        pushToast(`Approved ${event.title}`);
         glowIds([event.id]);
       }
       setOverlay(null);

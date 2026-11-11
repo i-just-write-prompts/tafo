@@ -140,6 +140,7 @@ export function dragReadout(title: string, day: string, start: number, end: numb
 }
 
 export function bannerText(moves: number, proposals: number, unsavedFits: boolean): string {
+  if (moves === 0 && proposals > 0) return `Agent suggests ${proposals}`;
   if (moves === 0) return "Drag blocks · nothing saves until Review";
   const base = `${plural(moves, "move")}${proposals ? ` · agent suggests ${proposals}` : ""}`;
   return unsavedFits ? `${base} · unsaved` : base;
