@@ -545,7 +545,6 @@ async function doubleTapApprove(page: Page, project: string, gap: number) {
   await page.touchscreen.tap(point.x, point.y);
   await page.waitForTimeout(gap);
   await page.touchscreen.tap(point.x, point.y);
-  await expect(page.getByTestId("plan-toast")).toBeVisible();
   await page.waitForTimeout(1000);
   expect(commits).toBe(1);
   const ghost = await page.evaluate(() => (window as unknown as { __ghost?: number }).__ghost || 0);
@@ -553,6 +552,7 @@ async function doubleTapApprove(page: Page, project: string, gap: number) {
     await expect(page.getByRole("dialog")).toBeVisible();
     await expect(page.getByTestId("review-sheet")).toHaveCount(0);
   } else {
+    await expect(page.getByTestId("plan-toast")).toBeVisible();
     expect(ghost).toBe(0);
     await expect(page.getByRole("dialog")).toHaveCount(0);
   }

@@ -145,7 +145,7 @@ function eventLabel(event: CalEvent): string {
   return `${event.title}, ${when}${state}`;
 }
 
-const APPROVE_CLICK_SHIELD_MS = 1200;
+const APPROVE_CLICK_SHIELD_MS = 700;
 
 export function CalendarShell(props: Props) {
   const timeZone = props.meta?.display_timezone || "America/Indianapolis";
@@ -464,7 +464,7 @@ export function CalendarShell(props: Props) {
     }
   }
 
-  async function retryRefused(outboxId: string, title: string, start: string, end: string, failedMessage = refusedMoveToast(title)) {
+  async function retryRefused(outboxId: string, title: string, start: string, end: string, failedMessage = refusedMoveToast(title), eventId?: string) {
     setBusyFlag(true);
     try {
       const result = await api<{ operation: { status?: string } | null; block: CalendarBlock | null }>(
@@ -472,8 +472,11 @@ export function CalendarShell(props: Props) {
         { method: "POST" },
       );
       if (!calendarWriteLanded({ outbox: result.operation, block: result.block }, start, end)) {
-        pushToast(failedMessage, undefined, () => retryRefused(outboxId, title, start, end, failedMessage));
+        pushToast(failedMessage, undefined, () => retryRefused(outboxId, title, start, end, failedMessage, eventId));
         return;
+      }
+      if (eventId) {
+        setPlan((current) => retainMoves(current, current.moves.filter((move) => move.id !== eventId).map((move) => move.id)));
       }
       const part = PlanTime.parts(new Date(start), timeZone);
       pushToast(quickToast(title, part.hour + part.minute / 60));
@@ -541,7 +544,7 @@ export function CalendarShell(props: Props) {
           pushToast(
             missed,
             undefined,
-            outboxId ? () => retryRefused(outboxId, event.title, startIso, endIso, missed) : undefined,
+            outboxId ? () => retryRefused(outboxId, event.title, startIso, endIso, missed, event.id) : undefined,
           );
           return;
         }
@@ -562,7 +565,7 @@ export function CalendarShell(props: Props) {
           pushToast(
             refusedMoveToast(title),
             undefined,
-            outboxId ? () => retryRefused(outboxId, title, startIso, endIso) : undefined,
+            outboxId ? () => retryRefused(outboxId, title, startIso, endIso, refusedMoveToast(title), event.id) : undefined,
           );
           return;
         }
@@ -994,12 +997,12 @@ export function CalendarShell(props: Props) {
         const title = move?.title || item.item_title || "A move";
         const proposalWrite = move?.kind === "proposal" || (!move && Boolean(proposal));
         const missed = proposalWrite ? unplacedToast(title) : refusedMoveToast(title);
-        return [{ outboxId, title, start, end, missed }];
+        return [{ outboxId, title, start, end, missed, eventId: item.item_id }];
       });
       const retryFailed = failedWrites.length
         ? async () => {
             for (const item of failedWrites) {
-              await retryRefused(item.outboxId, item.title, item.start, item.end, item.missed);
+              await retryRefused(item.outboxId, item.title, item.start, item.end, item.missed, item.eventId);
             }
           }
         : undefined;
@@ -1037,7 +1040,7 @@ export function CalendarShell(props: Props) {
           pushToast(
             missed,
             undefined,
-            outboxId ? () => retryRefused(outboxId, event.title, times.starts_at || event.start, times.ends_at || event.end, missed) : undefined,
+            outboxId ? () => retryRefused(outboxId, event.title, times.starts_at || event.start, times.ends_at || event.end, missed, event.id) : undefined,
           );
           return;
         }
@@ -1301,7 +1304,7 @@ export function CalendarShell(props: Props) {
           onRetry={(event) => {
             if (!event.outboxId) return;
             setOverlay(null);
-            void retryRefused(event.outboxId, event.title, event.start, event.end, unplacedToast(event.title));
+            void retryRefused(event.outboxId, event.title, event.start, event.end, unplacedToast(event.title), event.id);
           }}
           onTime={() => pushToast("Drag the block to change the time.")}
         />
