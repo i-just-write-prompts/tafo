@@ -459,6 +459,56 @@ test("compact conflict line fits and Review carries the name", async ({ page }, 
   await expect(page.getByTestId("changed-tag")).toContainText("Spec review");
 });
 
+async function blockAt(page: Page, x: number, y: number): Promise<string | null> {
+  return page.evaluate(({ px, py }) => {
+    const hit = document.elementsFromPoint(px, py).find((node) => node instanceof Element && node.closest(".block"));
+    return hit instanceof Element ? hit.closest(".block")?.getAttribute("data-title") ?? null : null;
+  }, { px: x, py: y });
+}
+
+/** Put a calendar block on the screen point Approve all occupies once the sheet is gone. */
+async function seedBlockUnderApprove(page: Page, x: number, y: number): Promise<void> {
+  const grid = page.getByTestId("day-grid");
+  const gridBox = await grid.boundingBox();
+  if (!gridBox) throw new Error("grid missing");
+  expect(y, "Approve all overlaps the calendar, not the tray").toBeGreaterThan(gridBox.y + 8);
+  expect(y).toBeLessThan(gridBox.y + gridBox.height - 8);
+  const hosts = page.locator(".v3-grid .block");
+  const count = await hosts.count();
+  let best: { index: number; box: { x: number; y: number; width: number; height: number } } | null = null;
+  for (let index = 0; index < count; index += 1) {
+    const box = await hosts.nth(index).boundingBox();
+    if (!box || box.height < 20 || box.width < 40) continue;
+    const coversX = x >= box.x + 4 && x <= box.x + box.width - 4;
+    if (!coversX) continue;
+    if (!best || Math.abs(box.y - y) < Math.abs(best.box.y - y)) best = { index, box };
+  }
+  if (!best) throw new Error(`no block spans x=${x}`);
+  const scroll = await grid.evaluate((node) => node.scrollTop);
+  const centerY = best.box.y + Math.min(best.box.height / 2, 24);
+  await grid.evaluate((node, top) => { node.scrollTop = Math.max(0, top); }, scroll + centerY - y);
+  await expect.poll(() => blockAt(page, x, y), { timeout: 2000 }).toBeTruthy();
+}
+
+async function placeApproveOverGrid(page: Page): Promise<{ x: number; y: number }> {
+  const grid = page.getByTestId("day-grid");
+  const gridBox = await grid.boundingBox();
+  const approve = page.getByTestId("approve-all");
+  if (!gridBox) throw new Error("grid missing");
+  const targetY = gridBox.y + gridBox.height * 0.72;
+  await page.evaluate((wanted) => {
+    const button = document.querySelector("[data-testid='approve-all']");
+    const sheet = button?.closest(".sheet");
+    if (!(button instanceof HTMLElement) || !(sheet instanceof HTMLElement)) return;
+    const rect = button.getBoundingClientRect();
+    sheet.scrollTop += rect.top + rect.height / 2 - wanted;
+  }, targetY);
+  await approve.scrollIntoViewIfNeeded();
+  const box = await approve.boundingBox();
+  if (!box) throw new Error("approve missing");
+  return { x: box.x + box.width / 2, y: box.y + box.height / 2 };
+}
+
 async function doubleTapApprove(page: Page, project: string, gap: number) {
   let commits = 0;
   page.on("request", (request) => {
@@ -467,33 +517,45 @@ async function doubleTapApprove(page: Page, project: string, gap: number) {
   await press(page.getByRole("button", { name: "Plan mode" }), project);
   await dragTitle(page, project, "Call vendor", 60);
   await press(page.getByRole("button", { name: "Review", exact: true }), project);
+  const first = await placeApproveOverGrid(page);
+  await press(page.getByRole("button", { name: "Keep planning" }), project);
+  await expect(page.getByTestId("review-sheet")).toHaveCount(0);
+  await seedBlockUnderApprove(page, first.x, first.y);
+  expect(await blockAt(page, first.x, first.y), "a block sits under Approve all").toBeTruthy();
+  await press(page.getByRole("button", { name: "Review", exact: true }), project);
+  const point = await placeApproveOverGrid(page);
+  expect(Math.abs(point.x - first.x)).toBeLessThan(4);
+  expect(Math.abs(point.y - first.y)).toBeLessThan(8);
   await page.evaluate(() => {
     const store = window as unknown as { __ghost?: number };
     store.__ghost = 0;
     document.addEventListener("click", (event) => {
       const target = event.target;
-      if (target instanceof Element && target.closest(".block")) store.__ghost = (store.__ghost || 0) + 1;
-    });
+      if (!(target instanceof Element) || !target.closest(".block")) return;
+      window.setTimeout(() => {
+        if (!event.defaultPrevented) store.__ghost = (store.__ghost || 0) + 1;
+      }, 0);
+    }, true);
   });
-  const approve = page.getByTestId("approve-all");
-  await approve.scrollIntoViewIfNeeded();
-  const box = await approve.boundingBox();
-  if (!box) throw new Error("approve missing");
-  const x = box.x + box.width / 2;
-  const y = box.y + box.height / 2;
   const hit = await page.evaluate(({ px, py }) => {
     const el = document.elementFromPoint(px, py);
     return Boolean(el && el.closest("[data-testid='approve-all']"));
-  }, { px: x, py: y });
+  }, { px: point.x, py: point.y });
   expect(hit, "the tap lands on Approve all").toBe(true);
-  await page.touchscreen.tap(x, y);
+  await page.touchscreen.tap(point.x, point.y);
   await page.waitForTimeout(gap);
-  await page.touchscreen.tap(x, y);
-  const toast = page.getByTestId("plan-toast");
-  await expect(toast).toBeVisible();
+  await page.touchscreen.tap(point.x, point.y);
+  await expect(page.getByTestId("plan-toast")).toBeVisible();
+  await page.waitForTimeout(1000);
   expect(commits).toBe(1);
-  expect(await page.evaluate(() => (window as unknown as { __ghost?: number }).__ghost || 0)).toBe(0);
-  await expect(page.getByRole("dialog", { name: /Call vendor|Spec review|Lunch/ })).toHaveCount(0);
+  const ghost = await page.evaluate(() => (window as unknown as { __ghost?: number }).__ghost || 0);
+  if (gap >= 700) {
+    await expect(page.getByRole("dialog")).toBeVisible();
+    await expect(page.getByTestId("review-sheet")).toHaveCount(0);
+  } else {
+    expect(ghost).toBe(0);
+    await expect(page.getByRole("dialog")).toHaveCount(0);
+  }
 }
 
 test("Approve all touch double-tap 100ms commits once without a ghost click", async ({ page }, testInfo) => {
@@ -501,7 +563,42 @@ test("Approve all touch double-tap 100ms commits once without a ghost click", as
   await doubleTapApprove(page, testInfo.project.name, 100);
 });
 
-test("Approve all touch double-tap 800ms commits once without a ghost click", async ({ page }, testInfo) => {
+test("Approve all touch double-tap 600ms commits once without a ghost click", async ({ page }, testInfo) => {
+  test.skip(testInfo.project.name === "desktop", "desktop has no touch screen");
+  await doubleTapApprove(page, testInfo.project.name, 600);
+});
+
+test("Approve all touch double-tap 800ms opens the block under the shield", async ({ page }, testInfo) => {
   test.skip(testInfo.project.name === "desktop", "desktop has no touch screen");
   await doubleTapApprove(page, testInfo.project.name, 800);
+});
+
+test("toast Retry of a refused approval clears the draft move", async ({ page }, testInfo) => {
+  const before = await readCalendar(page);
+  const budget = proposalNamed(before, "Budget sheet");
+  await press(page.getByRole("button", { name: "Plan mode" }), testInfo.project.name);
+  await dragTitle(page, testInfo.project.name, "Budget sheet", 60);
+  const draft = JSON.parse(await page.evaluate(() => localStorage.getItem("tafo.v3.plan.v2") || "null"));
+  const move = draft.moves.find((item: { title: string }) => item.title === "Budget sheet");
+  await armWriteFailure(page, [], 1);
+  await press(page.getByRole("button", { name: "Review", exact: true }), testInfo.project.name);
+  await press(page.getByTestId("approve-all"), testInfo.project.name);
+  await checkSaveClaim(page, {
+    case: "failure-then-retry",
+    toast: page.getByTestId("plan-toast"),
+    includes: ["still in plan"],
+    proposals: [{ id: budget.id, status: "approved" }],
+    retry: async () => {
+      await press(page.getByTestId("plan-toast").getByRole("button", { name: "Retry" }), testInfo.project.name);
+    },
+    afterRetry: {
+      toast: page.getByTestId("plan-toast"),
+      includes: ["→"],
+      proposals: [{ id: budget.id, status: "approved" }],
+      blocks: [{ taskTitle: "Budget sheet", starts_at: move.to.start, ends_at: move.to.end }],
+    },
+  });
+  const stored = JSON.parse(await page.evaluate(() => localStorage.getItem("tafo.v3.plan.v2") || "null"));
+  const kept = (stored?.moves ?? []).find((item: { id: string }) => item.id === move.id);
+  expect(kept, "toast Retry drops the draft move").toBeUndefined();
 });
