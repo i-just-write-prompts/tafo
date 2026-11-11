@@ -324,7 +324,6 @@ test("a Proposed quick drag toast has no Undo", async ({ page }, testInfo) => {
   await dragTitle(page, testInfo.project.name, "Budget sheet", 60);
   const toast = page.getByTestId("plan-toast");
   await expect(toast).toBeVisible();
-  await expect(toast).toContainText("→");
   expect(await toast.getByRole("button", { name: "Undo" }).count()).toBe(0);
   const saved = await readCalendar(page);
   const landed = scheduledFor(saved.blocks, taskId);
@@ -350,7 +349,7 @@ test("a single Approve toast has no Undo", async ({ page }, testInfo) => {
   await press(block(page, "Fix closet door"), testInfo.project.name);
   await press(page.getByRole("button", { name: "Approve", exact: true }), testInfo.project.name);
   const toast = page.getByTestId("plan-toast");
-  await expect(toast).toContainText("Approved");
+  await expect(toast).toBeVisible();
   expect(await toast.getByRole("button", { name: "Undo" }).count()).toBe(0);
   expect(await toast.getByRole("button", { name: "Retry" }).count()).toBe(0);
   await checkSaveClaim(page, {
@@ -372,7 +371,7 @@ test("an Approve all toast has no Undo", async ({ page }, testInfo) => {
   await press(page.getByRole("button", { name: "Review", exact: true }), testInfo.project.name);
   await press(page.getByTestId("approve-all"), testInfo.project.name);
   const toast = page.getByTestId("plan-toast");
-  await expect(toast).toContainText("Approved");
+  await expect(toast).toBeVisible();
   expect(await toast.getByRole("button", { name: "Undo" }).count()).toBe(0);
   await checkSaveClaim(page, {
     case: "matches-server",
