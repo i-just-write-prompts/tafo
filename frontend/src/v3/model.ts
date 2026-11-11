@@ -63,11 +63,11 @@ function proposalSpan(proposal: Proposal): { starts: string; ends: string; taskI
   return { starts, ends, taskId, domain };
 }
 
-function scheduledFor(blocks: CalendarBlock[], taskId: string | null, eventKey: string): boolean {
+function scheduledFor(blocks: CalendarBlock[], proposalId: string, eventKey: string): boolean {
   return blocks.some((block) => {
     if (block.status !== "scheduled") return false;
     if (eventKey && block.id === eventKey) return true;
-    return Boolean(taskId) && block.task_id === taskId;
+    return Boolean(proposalId) && block.origin_proposal_id === proposalId;
   });
 }
 
@@ -125,7 +125,7 @@ export function buildEvents(
     if (proposal.status !== "approved") continue;
     const latest = outbox.find((item) => item.proposal_id === proposal.id);
     if (!latest || (latest.status !== "failed" && latest.status !== "partial")) continue;
-    if (scheduledFor(blocks, placeSource.taskId, latest.event_key)) continue;
+    if (scheduledFor(blocks, proposal.id, latest.event_key)) continue;
     events.push({
       id: proposal.id,
       kind: "proposal",
