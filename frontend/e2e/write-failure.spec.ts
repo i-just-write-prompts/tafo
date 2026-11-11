@@ -248,6 +248,28 @@ test("after a failed approve, Revert all keeps Not on calendar with Retry", asyn
   });
 });
 
+test("Not on calendar Retry is a full-width secondary button", async ({ page }, testInfo) => {
+  await armWriteFailure(page, [], 1);
+  await dragTitle(page, testInfo.project.name, "Budget sheet", 60);
+  await expect(page.locator("[data-testid=plan-toast]")).toHaveCount(0, { timeout: 6000 });
+  const marker = page.getByRole("button", { name: /Budget sheet/ });
+  await expect(marker).toHaveAttribute("aria-label", /Not on calendar/);
+  await press(marker, testInfo.project.name);
+  const retry = page.getByTestId("unplaced-retry");
+  const sheet = page.getByRole("dialog", { name: "Budget sheet" });
+  await expect(retry).toBeVisible();
+  await expect(retry).toHaveText("Retry");
+  const box = await retry.boundingBox();
+  const sheetBox = await sheet.boundingBox();
+  if (!box || !sheetBox) throw new Error("retry box missing");
+  expect(box.height).toBeGreaterThanOrEqual(44);
+  expect(box.width).toBeGreaterThanOrEqual(sheetBox.width - 36);
+  const paint = await retry.evaluate((el) => getComputedStyle(el).backgroundColor);
+  expect(paint).not.toBe("rgb(237, 238, 240)");
+  expect(paint).not.toBe("rgba(0, 0, 0, 0)");
+  expect(paint).not.toBe("transparent");
+});
+
 test("a Proposed quick drag toast has no Undo", async ({ page }, testInfo) => {
   const before = await readCalendar(page);
   const budget = proposalNamed(before, "Budget sheet");
