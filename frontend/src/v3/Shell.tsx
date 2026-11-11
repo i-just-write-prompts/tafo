@@ -1106,6 +1106,7 @@ export function CalendarShell(props: Props) {
       {plan.active ? (
         <PlanBanner
           count={plan.moves.length}
+          suggestions={rangeIds.length}
           text={banner}
           live={lifted && liveParts != null}
           liveTitle={liveParts?.title ?? ""}
@@ -1461,6 +1462,7 @@ function ToastCopy(props: { message: string }) {
 
 function PlanBanner(props: {
   count: number;
+  suggestions: number;
   text: string;
   live: boolean;
   liveTitle: string;
@@ -1488,7 +1490,13 @@ function PlanBanner(props: {
         {props.conflict && !props.compact ? <p data-testid="plan-conflict">{props.conflict}</p> : null}
       </div>
       {props.live && props.crossing ? <span className="tag">Crosses work hours</span> : null}
-      {!props.live && props.count === 0 ? <button type="button" className="ghost-btn" onClick={props.onExit}>Exit</button> : null}
+      {!props.live && props.count === 0 && props.suggestions === 0 ? <button type="button" className="ghost-btn" onClick={props.onExit}>Exit</button> : null}
+      {!props.live && props.count === 0 && props.suggestions > 0 ? (
+        <div className="banner-actions">
+          <button type="button" className="ghost-btn" onClick={props.onExit}>Exit</button>
+          <button type="button" className="solid-btn" onClick={props.onReview}>Review</button>
+        </div>
+      ) : null}
       {!props.live && props.count > 0 ? (
         <div className="banner-actions">
           <button type="button" className="ghost-btn" onClick={props.onRevert}>Revert</button>

@@ -146,6 +146,7 @@ export function bannerText(moves: number, proposals: number, unsavedFits: boolea
 }
 
 export function approveLabel(moves: number, proposals: number): string {
+  if (moves === 0) return `Approve all · ${plural(proposals, "proposal")}`;
   if (proposals === 0) return `Approve all · ${plural(moves, "move")}`;
   return `Approve all · ${plural(moves, "move")} + ${plural(proposals, "proposal")}`;
 }
