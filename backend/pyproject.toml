@@ -1,0 +1,34 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "tafo"
+version = "0.1.0"
+description = "Task Around and Find Out — personal task and time-block MVP"
+requires-python = ">=3.11"
+dependencies = [
+  "fastapi>=0.132",
+  "uvicorn>=0.32.0",
+  "pydantic>=2.10.0",
+  "tzdata>=2024.1",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.3.0", "httpx>=0.27.0"]
+live = ["google-auth>=2.36.0"]
+
+[project.scripts]
+tafo = "tafo.main:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["tafo*"]
+
+[tool.setuptools.package-data]
+tafo = ["migrations/*.sql"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+addopts = "-v"

@@ -1,0 +1,169 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  backend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install
+        run: python -m pip install -e "backend[dev]"
+      - name: Pytest
+        working-directory: backend
+        run: python -m pytest -v
+
+  frontend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: Install
+        working-directory: frontend
+        run: npm ci
+      - name: Vitest
+        working-directory: frontend
+        run: npm test
+      - name: Typecheck
+        working-directory: frontend
+        run: npm run typecheck
+      - name: Build
+        working-directory: frontend
+        run: npm run build
+
+  e2e:
+    needs: [backend, frontend]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: Install backend
+        run: python -m pip install -e "backend[dev]"
+      - name: Install frontend
+        working-directory: frontend
+        run: npm ci
+      - name: Build frontend
+        working-directory: frontend
+        run: npm run build
+      - name: Install Playwright browsers
+        working-directory: frontend
+        run: npx playwright install --with-deps chromium webkit
+      - name: Playwright
+        working-directory: frontend
+        run: npx playwright test
+      - name: Upload HTML report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report
+          path: playwright-report/
+          if-no-files-found: warn
+          retention-days: 14
+      - name: Upload screenshots
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-screenshots
+          path: review-screenshots/
+          if-no-files-found: warn
+          retention-days: 14
+      - name: Comment screenshots on the pull request
+        if: always() && github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require("fs");
+            const path = require("path");
+            const marker = "<!-- tafo-playwright-screenshots -->";
+            const runUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+            const head = context.payload.pull_request.head.sha;
+
+            function walk(dir, acc) {
+              if (!fs.existsSync(dir)) return acc;
+              for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+                const full = path.join(dir, entry.name);
+                if (entry.isDirectory()) walk(full, acc);
+                else if (entry.name.endsWith(".png")) acc.push(full.split(path.sep).join("/"));
+              }
+              return acc;
+            }
+
+            function tally(node, acc) {
+              for (const spec of node.specs || []) {
+                for (const test of spec.tests || []) {
+                  const project = test.projectName || "unknown";
+                  if (!acc[project]) acc[project] = { expected: 0, unexpected: 0, flaky: 0, skipped: 0 };
+                  const status = test.status || "unknown";
+                  if (acc[project][status] == null) acc[project][status] = 0;
+                  acc[project][status] += 1;
+                }
+              }
+              for (const child of node.suites || []) tally(child, acc);
+              return acc;
+            }
+
+            let counts = {};
+            const resultsPath = "playwright-report/results.json";
+            if (fs.existsSync(resultsPath)) {
+              counts = tally(JSON.parse(fs.readFileSync(resultsPath, "utf8")), {});
+            }
+            const projects = ["phone", "desktop", "s23"];
+            const labels = {
+              phone: "iPhone 13 WebKit 390×844",
+              desktop: "Desktop Chrome 1280×800",
+              s23: "Galaxy S23 Chrome 360×668",
+            };
+            const lines = projects.map((project) => {
+              const row = counts[project] || {};
+              const parts = ["expected", "unexpected", "flaky", "skipped"]
+                .filter((key) => row[key])
+                .map((key) => `${row[key]} ${key}`);
+              return `| ${labels[project] || project} | ${parts.join(", ") || "no results"} |`;
+            });
+            const shots = walk("review-screenshots", []).sort();
+            const shotList = shots.length ? shots.map((file) => `- \`${file}\``).join("\n") : "- (none)";
+            const failed = Object.values(counts).some((row) => row.unexpected);
+            const body = [
+              marker,
+              `## Playwright ${failed ? "failed" : "passed"}`,
+              "",
+              `Head \`${head}\`. [Workflow run](${runUrl}).`,
+              "",
+              "Download the **playwright-report** artifact from that run for the HTML report (open `index.html`), and **playwright-screenshots** for one PNG per test and viewport.",
+              "",
+              "| Viewport | Tests |",
+              "| --- | --- |",
+              ...lines,
+              "",
+              "Screenshots:",
+              shotList,
+              "",
+            ].join("\n");
+
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.payload.pull_request.number,
+              body,
+            });

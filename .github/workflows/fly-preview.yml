@@ -1,0 +1,58 @@
+# Ready, not deployed, until FLY_API_TOKEN exists.
+# PREVIEW_PASSWORD is staged through flyctl stdin. It is not an action input,
+# a build arg, or a shell argument. Google credentials are never set.
+
+name: Fly preview
+
+on:
+  pull_request:
+    types: [opened, reopened, synchronize, closed]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: fly-preview-${{ github.event.pull_request.number }}
+  cancel-in-progress: false
+
+jobs:
+  review-app:
+    runs-on: ubuntu-latest
+    env:
+      PR_NUMBER: ${{ github.event.pull_request.number }}
+      REPO_OWNER: ${{ github.repository_owner }}
+      REPO_NAME: ${{ github.event.repository.name }}
+      FLY_ORG: ${{ vars.FLY_ORG }}
+      FLY_REGION: ${{ vars.FLY_REGION }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Skip until FLY_API_TOKEN exists
+        id: gate
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+        run: python3 scripts/fly_preview.py gate
+
+      - name: Install flyctl
+        if: steps.gate.outputs.present == 'true'
+        uses: superfly/flyctl-actions/setup-flyctl@1.5
+
+      - name: Remove the review app
+        if: steps.gate.outputs.present == 'true' && github.event.action == 'closed'
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+        run: python3 scripts/fly_preview.py destroy
+
+      - name: Stage preview password
+        if: steps.gate.outputs.present == 'true' && github.event.action != 'closed'
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+          PREVIEW_PASSWORD: ${{ secrets.PREVIEW_PASSWORD }}
+        run: python3 scripts/fly_preview.py stage
+
+      - name: Deploy review app
+        if: steps.gate.outputs.present == 'true' && github.event.action != 'closed'
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+          TAFO_REV: ${{ github.event.pull_request.head.sha }}
+        run: python3 scripts/fly_preview.py deploy
