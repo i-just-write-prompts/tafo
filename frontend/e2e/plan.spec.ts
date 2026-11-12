@@ -170,8 +170,16 @@ test("tap event reveals approve and deny", async ({ page }, testInfo) => {
 test("deny", async ({ page }, testInfo) => {
   await press(block(page, "Budget sheet"), testInfo.project.name);
   await press(page.getByRole("button", { name: "Deny", exact: true }), testInfo.project.name);
+  const before = await calendarState(page);
+  const budget = before.proposals.find((item) => item.kind === "calendar_block" && before.tasks.some((task) => task.id === item.payload.task_id && task.title === "Budget sheet"));
+  if (!budget) throw new Error("budget missing");
   const toast = page.getByTestId("plan-toast");
-  await expect(toast).toHaveText("Denied · Budget sheet → Unscheduled");
+  await checkSaveClaim(page, {
+    case: "matches-server",
+    toast,
+    includes: ["Denied · Budget sheet → Unscheduled"],
+    proposals: [{ id: budget.id, status: "rejected" }],
+  });
   await expectOneLine(toast);
   await expectClearOfEvents(page, toast);
   await expect(toast.getByRole("button", { name: "Undo" })).toHaveCount(0);
@@ -310,7 +318,15 @@ test("first touch drag after scrolling saves on the first try", async ({ page },
     const x = box.x + Math.min(18, box.width / 2);
     const y = Math.min(gridBox.y + gridBox.height - 28, Math.max(gridBox.y + 20, box.y + 18));
     await touchDrag(page, x, y, x, y + 90);
-    await expect(page.getByTestId("plan-toast")).toContainText("→");
+    const saved = await calendarState(page);
+    const row = saved.blocks.find((item) => item.title.startsWith(title.replace(/,$/, "")) && item.status === "scheduled");
+    if (!row) throw new Error(`${title} missing after drag`);
+    await checkSaveClaim(page, {
+      case: "matches-server",
+      toast: page.getByTestId("plan-toast"),
+      includes: ["→"],
+      blocks: [{ id: row.id, starts_at: row.starts_at, ends_at: row.ends_at }],
+    });
     await expect(target).not.toHaveAttribute("aria-label", before);
     return target.getAttribute("aria-label");
   }
@@ -394,10 +410,36 @@ test("Monday approval does not include other days' proposals", async ({ page }, 
   await expect(page.getByText("Fix closet door")).toHaveCount(0);
 });
 
+test("Plan mode shows Review and Approve all for agent suggestions alone", async ({ page }, testInfo) => {
+  const before = await readCalendar(page);
+  const budget = before.proposals.find((item) => item.kind === "calendar_block" && before.tasks.some((task) => task.id === item.payload.task_id && task.title === "Budget sheet"));
+  const closet = before.proposals.find((item) => item.kind === "calendar_block" && before.tasks.some((task) => task.id === item.payload.task_id && task.title === "Fix closet door"));
+  if (!budget || !closet) throw new Error("suggestions missing");
+  await press(page.getByRole("button", { name: "Plan mode" }), testInfo.project.name);
+  await expect(page.getByTestId("plan-banner")).toContainText("Agent suggests 2");
+  await expect(page.getByTestId("plan-banner")).not.toContainText("nothing saves until Review");
+  await expect(page.getByRole("button", { name: "Review", exact: true })).toBeVisible();
+  await press(page.getByRole("button", { name: "Review", exact: true }), testInfo.project.name);
+  const approve = page.getByRole("button", { name: "Approve all · 2 proposals" });
+  await expect(approve).toBeVisible();
+  await press(approve, testInfo.project.name);
+  await checkSaveClaim(page, {
+    case: "matches-server",
+    toast: page.getByTestId("plan-toast"),
+    includes: [/Approved/],
+    excludes: ["Undo"],
+    proposals: [
+      { id: budget.id, status: "approved" },
+      { id: closet.id, status: "approved" },
+    ],
+  });
+  expect(await page.getByTestId("plan-toast").getByRole("button", { name: "Undo" }).count()).toBe(0);
+});
+
 test("Plan enter keeps the current view", async ({ page }, testInfo) => {
   await press(page.getByTestId("plan-button"), testInfo.project.name);
-  await expect(page.getByTestId("plan-banner")).toContainText("Drag blocks");
-  await expect(page.getByTestId("plan-banner")).toContainText("nothing saves until Review");
+  await expect(page.getByTestId("plan-banner")).toContainText("Agent suggests 2");
+  await expect(page.getByTestId("plan-banner")).not.toContainText("nothing saves until Review");
   await expect(page.locator(".v3")).toHaveAttribute("data-mode", "day");
   await expect(page.getByTestId("day-grid")).toBeVisible();
   await expect(page.getByTestId("week-grid")).toHaveCount(0);
@@ -433,10 +475,19 @@ test("rearrange several items then Approve all", async ({ page }, testInfo) => {
   const approve = page.getByRole("button", { name: "Approve all · 3 moves + 2 proposals" });
   await expect(approve).toBeVisible();
   await shot(page, testInfo, "review");
+  const staged = JSON.parse(await page.evaluate(() => localStorage.getItem("tafo.v3.plan.v2") || "null"));
   await press(approve, testInfo.project.name);
   const approved = page.getByTestId("plan-toast");
-  const staged = JSON.parse(await page.evaluate(() => localStorage.getItem("tafo.v3.plan.v2") || "null"));
-  await expect(approved).toContainText("Approved 3 moves + 2 proposals");
+  await checkSaveClaim(page, {
+    case: "matches-server",
+    toast: approved,
+    includes: ["Approved 3 moves + 2 proposals"],
+    blocks: staged.moves.map((move: { id: string; to: { start: string; end: string } }) => ({
+      id: move.id,
+      starts_at: move.to.start,
+      ends_at: move.to.end,
+    })),
+  });
   const committed = await calendarState(page);
   for (const move of staged.moves) {
     const row = committed.blocks.find((item) => item.id === move.id);
@@ -462,7 +513,12 @@ test("Revert restores staged moves and leaves proposals pending", async ({ page 
   await shot(page, testInfo, "revert-sheet");
   await press(page.getByRole("button", { name: "Revert all" }), testInfo.project.name);
   const reverted = page.getByTestId("plan-toast");
-  await expect(reverted).toHaveText("Reverted. Nothing changed.");
+  await checkSaveClaim(page, {
+    case: "matches-server",
+    toast: reverted,
+    includes: ["Reverted. Nothing changed."],
+    blocks: [{ title: "Call vendor", starts_at: "2026-11-10T15:00:00Z", ends_at: "2026-11-10T15:30:00Z" }],
+  });
   await expectOneLine(reverted);
   await expectClearOfEvents(page, reverted);
   await expect(page.getByTestId("plan-banner")).toHaveCount(0);
@@ -511,7 +567,12 @@ test("keyboard-only path", async ({ page }) => {
   await focusMatching(/Call vendor/);
   await page.keyboard.press("ArrowDown");
   const nudged = page.getByTestId("plan-toast");
-  await expect(nudged).toContainText("Call vendor → 10:15 AM");
+  await checkSaveClaim(page, {
+    case: "matches-server",
+    toast: nudged,
+    includes: ["Call vendor → 10:15 AM"],
+    blocks: [{ title: "Call vendor", starts_at: "2026-11-10T15:15:00Z", ends_at: "2026-11-10T15:45:00Z" }],
+  });
   await expectOneLine(nudged);
   await expectClearOfEvents(page, nudged);
   await focusMatching(/^Undo$/);
@@ -524,7 +585,15 @@ test("keyboard-only path", async ({ page }) => {
   await focusMatching(/^Deny$/);
   await page.keyboard.press("Enter");
   const denied = page.getByTestId("plan-toast");
-  await expect(denied).toHaveText("Denied · Budget sheet → Unscheduled");
+  const deniedState = await calendarState(page);
+  const deniedBudget = deniedState.proposals.find((item) => item.kind === "calendar_block" && deniedState.tasks.some((task) => task.id === item.payload.task_id && task.title === "Budget sheet"));
+  if (!deniedBudget) throw new Error("budget missing");
+  await checkSaveClaim(page, {
+    case: "matches-server",
+    toast: denied,
+    includes: ["Denied · Budget sheet → Unscheduled"],
+    proposals: [{ id: deniedBudget.id, status: "rejected" }],
+  });
   await expectOneLine(denied);
   await expectClearOfEvents(page, denied);
   await expect(page.getByRole("button", { name: /Budget sheet/ })).toHaveCount(0);
@@ -589,9 +658,19 @@ test("B1 week plan move + revert repaints immediately", async ({ page }, testInf
   const specAgain = await center(block(page, "Spec review"));
   const designAgain = await center(block(page, "Design crit"));
   await uiDrag(page, testInfo.project.name, specAgain.x, specAgain.y, designAgain.x, designAgain.y);
+  const stagedSpec = JSON.parse(await page.evaluate(() => localStorage.getItem("tafo.v3.plan.v2") || "null"));
   await press(page.getByRole("button", { name: "Review", exact: true }), testInfo.project.name);
   await press(page.getByRole("button", { name: /Approve all/ }), testInfo.project.name);
-  await expect(page.getByTestId("plan-toast")).toContainText(/Approved/);
+  await checkSaveClaim(page, {
+    case: "matches-server",
+    toast: page.getByTestId("plan-toast"),
+    includes: [/Approved/],
+    blocks: stagedSpec.moves.map((move: { id: string; to: { start: string; end: string } }) => ({
+      id: move.id,
+      starts_at: move.to.start,
+      ends_at: move.to.end,
+    })),
+  });
   await expect(block(page, "Spec review")).toHaveAttribute("aria-label", /Thu/);
   await painted("Spec review");
 });
@@ -675,6 +754,18 @@ test("B4 tray info tap and grip drag", async ({ page }, testInfo) => {
   await expect(sheet).toHaveCSS("transition-duration", "0s");
   const trayBar = () => page.locator(".v3-tray .tray-grip").evaluate((node) => getComputedStyle(node, "::before").visibility);
   expect(await trayBar()).toBe("hidden");
+  const bars = await page.evaluate(() => {
+    const names: string[] = [];
+    for (const node of document.querySelectorAll(".tray-grip")) {
+      const before = getComputedStyle(node, "::before");
+      const rect = node.getBoundingClientRect();
+      const onScreen = rect.bottom > 0 && rect.top < window.innerHeight && rect.width > 0;
+      const shown = before.content !== "none" && before.visibility === "visible" && Number.parseFloat(before.width) > 0;
+      if (onScreen && shown) names.push(node.getAttribute("data-testid") || "grip");
+    }
+    return names;
+  });
+  expect(bars).toEqual(["tray-sheet-grip"]);
   await expect(sheet.getByText("Buy stamps")).toBeVisible();
   await expect(sheet.getByRole("heading", { name: "Demo · not synced" })).toBeVisible();
   const after = await grid.boundingBox();
@@ -850,13 +941,12 @@ test("N1 the approve toast matches the review classification", async ({ page }, 
   const review = (await button.innerText()).replace(/\s+/g, " ").trim();
   await press(button, testInfo.project.name);
   const toast = page.getByTestId("plan-toast");
-  await checkSaveClaim(page, {
+  const toastText = await checkSaveClaim(page, {
     case: "matches-server",
     toast,
     includes: ["Approved 2 moves + 1 proposal"],
     blocks: [{ id: specBefore.id, starts_at: specMove.to.start, ends_at: specMove.to.end }],
   });
-  const toastText = (await toast.locator("p").innerText()).replace(/\s+/g, " ").trim();
   expect(toastText.replace(/^Approved /, "")).toBe(review.replace(/^Approve all · /, ""));
 });
 
@@ -879,8 +969,12 @@ test("V2 approve all persists and the toast matches the server", async ({ page }
   await press(page.getByRole("button", { name: "Review", exact: true }), testInfo.project.name);
   await press(page.getByRole("button", { name: /Approve all/ }), testInfo.project.name);
   const toast = page.getByTestId("plan-toast");
-  await expect(toast).toBeVisible();
-  const toastText = await toast.locator("p").innerText();
+  const toastText = await checkSaveClaim(page, {
+    case: "matches-server",
+    toast,
+    includes: [/Approved 1 move/],
+    blocks: [{ id: specBefore.id, starts_at: stagedSpec.to.start, ends_at: stagedSpec.to.end }],
+  });
 
   async function agreed() {
     const state = await calendarState(page);
@@ -911,7 +1005,7 @@ test("V2 approve all persists and the toast matches the server", async ({ page }
     expect(claimedMoves).toBe(1);
     expect(claimedProposals).toBe(approved);
     expect(approved).toBe(2);
-    expect(await page.evaluate(() => localStorage.getItem("tafo.v3.plan"))).toBeNull();
+    expect(await page.evaluate(() => localStorage.getItem("tafo.v3.plan.v2"))).toBeNull();
   }
 
   await agreed();
@@ -937,7 +1031,7 @@ test("R1 a failed calendar write stays in the plan", async ({ page }, testInfo) 
   await press(page.getByRole("button", { name: "Review", exact: true }), testInfo.project.name);
   await press(page.getByRole("button", { name: /Approve all/ }), testInfo.project.name);
   const toast = page.getByTestId("plan-toast");
-  await checkSaveClaim(page, {
+  const rendered = await checkSaveClaim(page, {
     case: "forced-failure",
     toast,
     includes: ["Saved 2 of 3 · Spec review still in plan"],
@@ -945,6 +1039,7 @@ test("R1 a failed calendar write stays in the plan", async ({ page }, testInfo) 
     blocks: [{ id: specBefore.id, starts_at: specBefore.starts_at }],
     proposals: [{ id: closetBefore.id, status: "approved" }],
   });
+  expect(rendered).toContain("Saved 2 of 3 · Spec review still in plan");
   const draft = JSON.parse(await page.evaluate(() => localStorage.getItem("tafo.v3.plan.v2") || "null"));
   expect(draft.moves.map((item: { id: string }) => item.id)).toEqual([specBefore.id]);
   expect(draft.active).toBe(true);
@@ -1003,12 +1098,14 @@ test("R4 client skips a Changed move and keeps the newer time", async ({ page },
   });
   expect(changed.ok, changed.text).toBeTruthy();
   await page.reload();
-  await expect(page.getByTestId("plan-conflict")).toContainText("Spec review");
+  if (testInfo.project.name === "s23") await expect(page.getByTestId("plan-conflict")).toHaveText("1 changed");
+  else await expect(page.getByTestId("plan-conflict")).toContainText("Changed · Spec review");
   const posts: string[] = [];
   page.on("request", (request) => {
     if (request.method() === "POST" && request.url().includes("/api/decisions/plan/commit")) posts.push(request.postData() || "");
   });
   await press(page.getByRole("button", { name: "Review", exact: true }), testInfo.project.name);
+  await expect(page.getByTestId("changed-tag")).toHaveText("Changed");
   await press(page.getByRole("button", { name: /Approve all/ }), testInfo.project.name);
   await checkSaveClaim(page, {
     case: "matches-server",
@@ -1023,7 +1120,8 @@ test("R4 client skips a Changed move and keeps the newer time", async ({ page },
 test("R5 unsynced moved proposal does not block healthy moves", async ({ page }, testInfo) => {
   const before = await calendarState(page);
   const vendor = before.blocks.find((item) => item.title === "Call vendor");
-  if (!vendor) throw new Error("vendor missing");
+  const budgetProposal = before.proposals.find((item) => item.kind === "calendar_block" && before.tasks.some((task) => task.id === item.payload.task_id && task.title === "Budget sheet"));
+  if (!vendor || !budgetProposal) throw new Error("fixture missing");
   await press(page.getByRole("button", { name: "Plan mode" }), testInfo.project.name);
   const budget = block(page, "Budget sheet");
   await budget.scrollIntoViewIfNeeded();
@@ -1033,11 +1131,14 @@ test("R5 unsynced moved proposal does not block healthy moves", async ({ page },
   await press(page.getByRole("button", { name: "Review", exact: true }), testInfo.project.name);
   await press(page.getByRole("button", { name: /Approve all/ }), testInfo.project.name);
   const failed = page.getByTestId("plan-toast");
+  const draft = JSON.parse(await page.evaluate(() => localStorage.getItem("tafo.v3.plan.v2") || "null"));
+  const budgetMove = draft.moves.find((item: { title: string }) => item.title === "Budget sheet");
   await checkSaveClaim(page, {
     case: "failure-then-retry",
     toast: failed,
     includes: ["Budget sheet", "still in plan"],
-    excludes: ["not pending"],
+    excludes: ["not pending", "Changed"],
+    proposals: [{ id: budgetProposal.id, status: "approved" }],
     retry: async () => {
       const call = block(page, "Call vendor");
       await call.scrollIntoViewIfNeeded();
@@ -1048,10 +1149,17 @@ test("R5 unsynced moved proposal does not block healthy moves", async ({ page },
     },
     afterRetry: {
       toast: page.getByTestId("plan-toast"),
-      excludes: ["not pending", "Nothing was saved"],
-      blocks: [{ id: vendor.id, starts_at: "2026-11-10T16:00:00Z", ends_at: "2026-11-10T16:30:00Z" }],
+      includes: [/Approved/],
+      excludes: ["not pending", "Nothing was saved", "Changed"],
+      proposals: [{ id: budgetProposal.id, status: "approved" }],
+      blocks: [
+        { id: vendor.id, starts_at: "2026-11-10T16:00:00Z", ends_at: "2026-11-10T16:30:00Z" },
+        { taskTitle: "Budget sheet", starts_at: budgetMove.to.start, ends_at: budgetMove.to.end },
+      ],
     },
   });
+  expect(await page.evaluate(() => localStorage.getItem("tafo.v3.plan.v2"))).toBeNull();
+  await expect(page.getByTestId("plan-conflict")).toHaveCount(0);
 });
 
 test("V3 a failed confirmation read still drops saved moves", async ({ page }, testInfo) => {
@@ -1084,12 +1192,21 @@ test("V3 a failed confirmation read still drops saved moves", async ({ page }, t
   await press(page.getByRole("button", { name: "Review", exact: true }), testInfo.project.name);
   await press(page.getByRole("button", { name: /Approve all/ }), testInfo.project.name);
   const toast = page.getByTestId("plan-toast");
-  await expect(toast).toHaveText("Saved · refreshing the calendar");
-  await expect(toast).not.toContainText("unsaved");
-  await expect(toast).not.toContainText("Nothing was changed");
-  expect(await page.evaluate(() => localStorage.getItem("tafo.v3.plan.v2"))).toBeNull();
+  await expect(toast).toBeVisible();
   await page.unroute("**/api/calendar/blocks");
   await page.unroute("**/api/hermes/proposals");
+  await checkSaveClaim(page, {
+    case: "matches-server",
+    toast,
+    includes: ["Saved · refreshing the calendar"],
+    excludes: ["unsaved", "Nothing was changed"],
+    blocks: staged.moves.map((move: { id: string; to: { start: string; end: string } }) => ({
+      id: move.id,
+      starts_at: move.to.start,
+      ends_at: move.to.end,
+    })),
+  });
+  expect(await page.evaluate(() => localStorage.getItem("tafo.v3.plan.v2"))).toBeNull();
   await page.reload();
   await expect(page.getByTestId("plan-banner")).toHaveCount(0);
   await press(page.getByTestId("view-switch"), testInfo.project.name);
@@ -1102,6 +1219,78 @@ test("V3 a failed confirmation read still drops saved moves", async ({ page }, t
     expect(label).toContain(uiWhen(row?.starts_at || ""));
   }
   expect(after.proposals.filter((item) => item.kind === "calendar_block" && item.status === "pending")).toHaveLength(0);
+});
+
+async function rawTouchTap(page: Page, x: number, y: number) {
+  const client = await page.context().newCDPSession(page);
+  await client.send("Input.dispatchTouchEvent", {
+    type: "touchStart",
+    touchPoints: [{ x, y, id: 0, radiusX: 1, radiusY: 1 }],
+  });
+  await client.send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
+  await client.detach();
+}
+
+test("V3 touch double-tap of two moves commits once", async ({ page }, testInfo) => {
+  test.skip(testInfo.project.name === "desktop", "desktop has no touch screen");
+  let commits = 0;
+  page.on("request", (request) => {
+    if (request.method() === "POST" && request.url().includes("/api/decisions/plan/commit")) commits += 1;
+  });
+  await page.evaluate(() => {
+    const record = (name: string) => {
+      const log = (window as unknown as { __taps?: string[] });
+      log.__taps = log.__taps || [];
+      log.__taps.push(name);
+    };
+    document.addEventListener("pointerup", () => record("pointerup"), true);
+    document.addEventListener("click", () => record("click"), true);
+    document.addEventListener("touchend", () => record("touchend"), true);
+  });
+  await press(page.getByTestId("view-switch"), testInfo.project.name);
+  await press(page.getByRole("menuitem", { name: "Week" }), testInfo.project.name);
+  await press(page.getByRole("button", { name: "Plan mode" }), testInfo.project.name);
+  const spec = block(page, "Spec review");
+  await spec.scrollIntoViewIfNeeded();
+  const specAt = await center(spec);
+  const column = await page.locator(".workband").first().evaluate((node) => node.getBoundingClientRect().width);
+  await uiDrag(page, testInfo.project.name, specAt.x, specAt.y, specAt.x + column, specAt.y);
+  const lunch = block(page, "Lunch w/ Sam");
+  await lunch.scrollIntoViewIfNeeded();
+  const lunchAt = await center(lunch);
+  await uiDrag(page, testInfo.project.name, lunchAt.x, lunchAt.y, lunchAt.x + column, lunchAt.y);
+  await expect(page.getByTestId("plan-banner")).toContainText("2 moves");
+  const staged = JSON.parse(await page.evaluate(() => localStorage.getItem("tafo.v3.plan.v2") || "null"));
+  await press(page.getByRole("button", { name: "Review", exact: true }), testInfo.project.name);
+  const approve = page.getByTestId("approve-all");
+  await approve.scrollIntoViewIfNeeded();
+  const box = await approve.boundingBox();
+  if (!box) throw new Error("approve missing");
+  const x = box.x + box.width / 2;
+  const y = box.y + box.height / 2;
+  if (testInfo.project.name === "s23") {
+    await rawTouchTap(page, x, y);
+    await page.waitForTimeout(100);
+    await rawTouchTap(page, x, y);
+  } else {
+    await page.touchscreen.tap(x, y);
+    await page.waitForTimeout(100);
+    await page.touchscreen.tap(x, y);
+  }
+  const toast = page.getByTestId("plan-toast");
+  await checkSaveClaim(page, {
+    case: "matches-server",
+    toast,
+    includes: [/Approved/],
+    excludes: ["still in plan", "Nothing was saved"],
+    blocks: staged.moves.map((move: { id: string; to: { start: string; end: string } }) => ({
+      id: move.id,
+      starts_at: move.to.start,
+      ends_at: move.to.end,
+    })),
+  });
+  expect(commits).toBe(1);
+  expect(await page.evaluate(() => localStorage.getItem("tafo.v3.plan.v2"))).toBeNull();
 });
 
 test("V3 touch double-tap on Approve all commits once", async ({ page }, testInfo) => {
@@ -1127,13 +1316,14 @@ test("V3 touch double-tap on Approve all commits once", async ({ page }, testInf
   await page.waitForTimeout(56);
   await page.touchscreen.tap(x, y);
   const toast = page.getByTestId("plan-toast");
-  await expect(toast).toBeVisible({ timeout: 2000 });
-  await expect(toast).toContainText(/Approved|Saved/);
-  await expect(toast).not.toContainText("changed");
+  await checkSaveClaim(page, {
+    case: "matches-server",
+    toast,
+    includes: [/Approved|Saved/],
+    excludes: ["changed"],
+    blocks: [{ id: staged.moves[0].id, starts_at: staged.moves[0].to.start, ends_at: staged.moves[0].to.end }],
+  });
   expect(commits).toBe(1);
-  const after = await calendarState(page);
-  const row = after.blocks.find((item) => item.id === staged.moves[0].id);
-  expect(Date.parse(row?.starts_at || "")).toBe(Date.parse(staged.moves[0].to.start));
   expect(await page.evaluate(() => localStorage.getItem("tafo.v3.plan.v2"))).toBeNull();
 });
 
@@ -1178,14 +1368,26 @@ test("R2 a stale draft does not overwrite a newer block", async ({ page }, testI
   await press(page.getByRole("button", { name: "Review", exact: true }), testInfo.project.name);
   await press(page.getByRole("button", { name: /Approve all/ }), testInfo.project.name);
   const toast = page.getByTestId("plan-toast");
-  await expect(toast).toContainText("Spec review changed");
+  await checkSaveClaim(page, {
+    case: "matches-server",
+    toast,
+    includes: ["Spec review changed, so nothing was saved"],
+    excludes: ["Approved"],
+    blocks: [{ id: specBefore.id, starts_at: shifted, ends_at: shiftedEnd }],
+  });
   const after = await calendarState(page);
   const specRow = after.blocks.find((item) => item.id === specBefore.id);
   expect(Date.parse(specRow?.starts_at || "")).toBe(Date.parse(shifted));
   const draft = JSON.parse(await page.evaluate(() => localStorage.getItem("tafo.v3.plan.v2") || "null"));
   expect(draft.moves.map((item: { id: string }) => item.id)).toEqual([specBefore.id]);
   expect(draft.moves[0].version).toBe(staged.moves[0].version);
-  await expect(page.getByTestId("plan-conflict")).toContainText("Changed · Spec review");
+  if (testInfo.project.name === "s23") {
+    await expect(page.getByTestId("plan-conflict")).toHaveText("1 changed");
+    await press(page.getByRole("button", { name: "Review", exact: true }), testInfo.project.name);
+    await expect(page.getByTestId("changed-tag")).toHaveText("Changed");
+  } else {
+    await expect(page.getByTestId("plan-conflict")).toContainText("Changed · Spec review");
+  }
 });
 
 test.describe("motion", () => {

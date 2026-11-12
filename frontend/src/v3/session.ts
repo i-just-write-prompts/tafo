@@ -174,7 +174,7 @@ export function splitPlanSave(
 }
 
 export function conflictingMoveIds(
-  moves: Array<Pick<StagedMove, "id" | "kind" | "version" | "from">>,
+  moves: Array<Pick<StagedMove, "id" | "kind" | "version" | "from" | "to">>,
   blocks: Array<{ id: string; version: number; starts_at: string; ends_at: string }>,
   proposals: Array<{ id: string; version: number; status: string; starts_at?: string; ends_at?: string }>,
 ): string[] {
@@ -185,7 +185,12 @@ export function conflictingMoveIds(
       return !sameInstant(block.starts_at, move.from.start) || !sameInstant(block.ends_at, move.from.end);
     }
     const proposal = proposals.find((item) => item.id === move.id);
-    if (!proposal || proposal.status !== "pending" || proposal.version !== move.version) return true;
+    if (!proposal) return true;
+    if (proposal.status === "approved") {
+      if (!proposal.starts_at || !proposal.ends_at) return true;
+      return !sameInstant(proposal.starts_at, move.to.start) || !sameInstant(proposal.ends_at, move.to.end);
+    }
+    if (proposal.status !== "pending" || proposal.version !== move.version) return true;
     if (!proposal.starts_at || !proposal.ends_at) return true;
     return !sameInstant(proposal.starts_at, move.from.start) || !sameInstant(proposal.ends_at, move.from.end);
   }).map((move) => move.id);

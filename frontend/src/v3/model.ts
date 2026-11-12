@@ -9,7 +9,7 @@ export interface CalEvent {
   domain: Domain;
   start: string;
   end: string;
-  state: "approved" | "proposed" | "done";
+  state: "approved" | "proposed" | "done" | "unplaced";
   taskId: string | null;
   version: number;
   fixed: boolean;
@@ -17,6 +17,17 @@ export interface CalEvent {
   dayKey: string;
   startHour: number;
   endHour: number;
+  /** Set when the event is an approved proposal whose calendar write did not land. */
+  outboxId?: string | null;
+}
+
+/** Newest first, the same order as GET /api/calendar/outbox. */
+export interface OutboxSnapshot {
+  id: string;
+  proposal_id: string;
+  status: string;
+  operation: string;
+  event_key: string;
 }
 
 export interface ShowFilters {
@@ -42,11 +53,30 @@ function span(start: string, end: string, timeZone: string): { dayKey: string; s
   return { dayKey: opened.dayKey, startHour: opened.hour, endHour };
 }
 
+function proposalSpan(proposal: Proposal): { starts: string; ends: string; taskId: string | null; domain: Domain } | null {
+  const payload = proposal.edited_payload ?? proposal.payload;
+  const starts = payload.starts_at;
+  const ends = payload.ends_at;
+  if (typeof starts !== "string" || typeof ends !== "string") return null;
+  const taskId = typeof payload.task_id === "string" ? payload.task_id : null;
+  const domain = (payload.domain || "work") as Domain;
+  return { starts, ends, taskId, domain };
+}
+
+function scheduledFor(blocks: CalendarBlock[], proposalId: string, eventKey: string): boolean {
+  return blocks.some((block) => {
+    if (block.status !== "scheduled") return false;
+    if (eventKey && block.id === eventKey) return true;
+    return Boolean(proposalId) && block.origin_proposal_id === proposalId;
+  });
+}
+
 export function buildEvents(
   tasks: Task[],
   blocks: CalendarBlock[],
   proposals: Proposal[],
   timeZone: string,
+  outbox: OutboxSnapshot[] = [],
 ): CalEvent[] {
   const events: CalEvent[] = [];
   for (const block of blocks) {
@@ -69,27 +99,46 @@ export function buildEvents(
     });
   }
   for (const proposal of proposals) {
-    if (proposal.status !== "pending" || proposal.kind !== "calendar_block") continue;
-    const payload = PlanBoard.payload(proposal);
-    const starts = payload.starts_at;
-    const ends = payload.ends_at;
-    if (typeof starts !== "string" || typeof ends !== "string") continue;
-    const taskId = typeof payload.task_id === "string" ? payload.task_id : null;
-    const task = taskId ? tasks.find((item) => item.id === taskId) : undefined;
-    const domain = (task?.domain || payload.domain || "work") as Domain;
-    const place = span(starts, ends, timeZone);
+    if (proposal.kind !== "calendar_block") continue;
+    const placeSource = proposalSpan(proposal);
+    if (!placeSource) continue;
+    const task = placeSource.taskId ? tasks.find((item) => item.id === placeSource.taskId) : undefined;
+    const domain = (task?.domain || placeSource.domain) as Domain;
+    const place = span(placeSource.starts, placeSource.ends, timeZone);
+    if (proposal.status === "pending") {
+      events.push({
+        id: proposal.id,
+        kind: "proposal",
+        title: PlanBoard.titleForProposal(proposal, tasks),
+        domain,
+        start: placeSource.starts,
+        end: placeSource.ends,
+        state: "proposed",
+        taskId: placeSource.taskId,
+        version: proposal.version,
+        fixed: false,
+        explanation: proposal.explanation,
+        ...place,
+      });
+      continue;
+    }
+    if (proposal.status !== "approved") continue;
+    const latest = outbox.find((item) => item.proposal_id === proposal.id);
+    if (!latest || (latest.status !== "failed" && latest.status !== "partial")) continue;
+    if (scheduledFor(blocks, proposal.id, latest.event_key)) continue;
     events.push({
       id: proposal.id,
       kind: "proposal",
       title: PlanBoard.titleForProposal(proposal, tasks),
       domain,
-      start: starts,
-      end: ends,
-      state: "proposed",
-      taskId,
+      start: placeSource.starts,
+      end: placeSource.ends,
+      state: "unplaced",
+      taskId: placeSource.taskId,
       version: proposal.version,
       fixed: false,
       explanation: proposal.explanation,
+      outboxId: latest.id,
       ...place,
     });
   }

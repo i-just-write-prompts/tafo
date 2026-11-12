@@ -51,6 +51,7 @@ class Settings:
     preview: bool = False
     static_dir: str = ""
     preview_password: str = ""
+    e2e: bool = False
 
     @classmethod
     def from_env(cls) -> Settings:
@@ -67,6 +68,7 @@ class Settings:
         google_calendar_id = os.environ.get("TAFO_GOOGLE_CALENDAR_ID", "").strip()
         work_invite_email = os.environ.get("TAFO_WORK_INVITE_EMAIL", "").strip()
         seed_demo = _flag(os.environ.get("TAFO_SEED_DEMO"), True)
+        e2e = _flag(os.environ.get("TAFO_E2E"), False)
         if preview:
             # A review app is public. Demo data only, and ignore any credential that leaked in.
             calendar_mode = "demo"
@@ -74,6 +76,7 @@ class Settings:
             google_calendar_id = ""
             work_invite_email = ""
             seed_demo = False
+            e2e = False
         return cls(
             host=os.environ.get("TAFO_HOST", "127.0.0.1").strip() or "127.0.0.1",
             port=int(os.environ.get("TAFO_PORT", "8787")),
@@ -91,6 +94,7 @@ class Settings:
             preview=preview,
             static_dir=os.environ.get("TAFO_SERVE_STATIC_DIR", "").strip(),
             preview_password=os.environ.get("PREVIEW_PASSWORD", "").strip() if preview else "",
+            e2e=e2e,
         )
 
     def validate(self) -> None:

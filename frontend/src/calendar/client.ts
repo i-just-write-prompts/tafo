@@ -7,7 +7,7 @@
  * transport), and the confirmation read with its retries.
  */
 import { api } from "../api";
-import type { CalendarBlock, Proposal } from "../types";
+import type { CalendarBlock, OutboxOperation, Proposal } from "../types";
 
 export interface CalendarRange {
   /** Inclusive window start, ISO-8601. */
@@ -43,11 +43,17 @@ export interface MoveRequest {
   proposal?: Proposal;
 }
 
+export interface CalendarOutbox {
+  id?: string;
+  status?: string;
+}
+
 export interface MoveResult {
   outcome: "saved" | "not_synced";
   block: CalendarBlock | null;
   proposal: Proposal | null;
   idempotentReplay: boolean;
+  outbox: CalendarOutbox | null;
 }
 
 export interface UndoRequest {
@@ -86,6 +92,12 @@ export interface PlanCommitItem {
   saved: boolean;
   outcome: "saved" | "not_synced";
   idempotentReplay: boolean;
+  outbox: CalendarOutbox | null;
+}
+
+export interface RetryOutboxResult {
+  operation: CalendarOutbox | null;
+  block: CalendarBlock | null;
 }
 
 export interface PlanCommitResult {
@@ -97,6 +109,8 @@ export interface PlanCommitResult {
 
 export interface DecideResult {
   proposal: Proposal | null;
+  block: CalendarBlock | null;
+  outbox: CalendarOutbox | null;
   idempotentReplay: boolean;
 }
 
@@ -125,6 +139,8 @@ export interface CalendarClient {
   commitPlan(input: { moves: PlanMoveInput[]; approvals: PlanApprovalInput[] }): Promise<PlanCommitResult>;
   decide(proposal: Proposal, action: "approve" | "deny"): Promise<DecideResult>;
   suggest(input: SuggestRequest, options: { notThese: TimeSpan[] }): Promise<SuggestResult>;
+  retryOutbox(outboxId: string): Promise<RetryOutboxResult>;
+  listOutbox(): Promise<OutboxOperation[]>;
   /** Opaque token stored on a staged move. The same target keeps `previous`. */
   saveKey(prefix: string, previous?: string, sameTarget?: boolean): string;
 }
@@ -154,6 +170,7 @@ interface WireCommitItem {
   item_id?: string;
   item_title?: string;
   idempotent_replay?: boolean;
+  outbox?: { id?: string; status?: string } | null;
 }
 
 interface WireSuggestion {
@@ -205,6 +222,7 @@ function fromDecision(body: WireDecision): MoveResult {
     block: body.block ?? null,
     proposal: body.proposal ?? null,
     idempotentReplay: Boolean(body.idempotent_replay),
+    outbox: body.outbox ?? null,
   };
 }
 
@@ -216,6 +234,7 @@ function fromCommitItem(raw: WireCommitItem): PlanCommitItem {
     saved,
     outcome: saved && raw.outcome !== "not_synced" ? "saved" : "not_synced",
     idempotentReplay: Boolean(raw.idempotent_replay),
+    outbox: raw.outbox ?? null,
   };
 }
 
@@ -308,8 +327,8 @@ export function createCalendarClient(deps: CalendarDeps = {}): CalendarClient {
     async move(input) {
       if (input.kind === "proposal") {
         if (!input.proposal) throw new Error("A proposal move needs the proposal.");
-        const proposal = await editProposal(input.proposal, input.proposal.version, input.startsAt, input.endsAt);
-        return { outcome: "saved", block: null, proposal, idempotentReplay: false };
+        const edited = await editProposal(input.proposal, input.proposal.version, input.startsAt, input.endsAt);
+        return approveProposal(edited, input.acknowledgeFixed === true);
       }
       if (!input.block) throw new Error("A block move needs the block.");
       const proposal = await proposeUpdate(input.block, input, mintKey("move"));
@@ -320,7 +339,7 @@ export function createCalendarClient(deps: CalendarDeps = {}): CalendarClient {
       if (input.kind === "proposal") {
         if (!input.proposal) throw new Error("Undoing a proposal needs the proposal from before the move.");
         const proposal = await editProposal(input.proposal, input.proposal.version + 1, input.startsAt, input.endsAt);
-        return { outcome: "saved", block: null, proposal, idempotentReplay: false };
+        return { outcome: "saved", block: null, proposal, idempotentReplay: false, outbox: null };
       }
       if (!input.block) throw new Error("Undoing a block needs the saved block.");
       return client.move({
@@ -382,10 +401,28 @@ export function createCalendarClient(deps: CalendarDeps = {}): CalendarClient {
             note: "Denied",
           }),
         });
-        return { proposal: denied, idempotentReplay: false };
+        return { proposal: denied, block: null, outbox: null, idempotentReplay: false };
       }
       const approved = await approveProposal(proposal, false);
-      return { proposal: approved.proposal, idempotentReplay: approved.idempotentReplay };
+      return {
+        proposal: approved.proposal,
+        block: approved.block,
+        outbox: approved.outbox,
+        idempotentReplay: approved.idempotentReplay,
+      };
+    },
+
+    async retryOutbox(outboxId) {
+      const body = await transport.request<{ operation?: CalendarOutbox | null; block?: CalendarBlock | null }>(
+        `/api/calendar/outbox/${outboxId}/retry`,
+        { method: "POST" },
+      );
+      return { operation: body?.operation ?? null, block: body?.block ?? null };
+    },
+
+    async listOutbox() {
+      const body = await transport.request<{ operations?: OutboxOperation[] } | null>("/api/calendar/outbox");
+      return body?.operations ?? [];
     },
 
     async suggest(input, options) {

@@ -2,27 +2,30 @@ import { useCallback, useEffect, useState } from "react";
 import { OFFLINE_MESSAGE, api } from "./api";
 import { ENTIRE_CALENDAR, calendar } from "./calendar/client";
 import { CalendarShell } from "./v3/Shell";
-import type { CalendarBlock, Meta, Proposal, Task } from "./types";
+import type { CalendarBlock, Meta, OutboxOperation, Proposal, Task } from "./types";
 
 export function App() {
   const [meta, setMeta] = useState<Meta | null>(null);
   const [tasks, setTasks] = useState<Task[]>([]);
   const [proposals, setProposals] = useState<Proposal[]>([]);
   const [blocks, setBlocks] = useState<CalendarBlock[]>([]);
+  const [outbox, setOutbox] = useState<OutboxOperation[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
 
   const refresh = useCallback(async () => {
     try {
-      const [nextMeta, taskBody, snapshot] = await Promise.all([
+      const [nextMeta, taskBody, snapshot, outboxBody] = await Promise.all([
         api<Meta>("/api/meta"),
         api<{ tasks: Task[] }>("/api/tasks?view=all&scope=all"),
         calendar.load(ENTIRE_CALENDAR),
+        calendar.listOutbox(),
       ]);
       setMeta(nextMeta);
       setTasks(taskBody.tasks);
       setProposals(snapshot.proposals);
       setBlocks(snapshot.blocks);
+      setOutbox(outboxBody);
       setError(null);
       setLoading(false);
     } catch (reason) {
@@ -50,6 +53,7 @@ export function App() {
       tasks={tasks}
       blocks={blocks}
       proposals={proposals}
+      outbox={outbox}
       loading={loading && !meta}
       error={error}
       onRefresh={refresh}

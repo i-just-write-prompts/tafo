@@ -1,12 +1,12 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { flushSync } from "react-dom";
 import { ApiError, reportFailure } from "../api";
-import { calendar } from "../calendar/client";
+import { calendar, type PlanApprovalInput, type PlanMoveInput } from "../calendar/client";
 import { PlanMachine } from "../plan/planMachine";
 import { PlanBoard } from "../plan/selectors";
 import { PlanTime } from "../plan/time";
 import { TAFO_REV } from "../rev";
-import type { CalendarBlock, Meta, Proposal, Task } from "../types";
+import type { CalendarBlock, Meta, OutboxOperation, Proposal, Task } from "../types";
 import {
   DAY_GUTTER,
   DAY_ORIGIN,
@@ -29,15 +29,17 @@ import {
 } from "./geometry";
 import {
   PLAN_HINT,
-  REVERT_TOAST,
+  revertToast,
   SYNC_DEMO,
   TIP_TEXT,
   SAVED_REFRESH,
   approveLabel,
   approvedToast,
   bannerText,
+  compactConflict,
   partialPlanToast,
   clock,
+  clockMinutes,
   dayName,
   dayTitle,
   denyToast,
@@ -45,6 +47,8 @@ import {
   exactClock,
   gutterClock,
   quickToast,
+  refusedMoveToast,
+  unplacedToast,
   rangeLabel,
   shortRange,
   weekTitle,
@@ -52,7 +56,7 @@ import {
 import { COMMIT_PX, gestureDown, gestureMove, gestureUp, HOLD_MS, holdReady, type Gesture } from "./gesture";
 import { CheckGlyph, Chevron, InfoGlyph, MoreGlyph, PlanGlyph, SearchGlyph, Sparkle } from "./icons";
 import { ALL_SHOWN, buildEvents, showSummary, visibleEvents, withMove, type CalEvent, type ShowFilters } from "./model";
-import { approveDisabled, conflictingMoveIds, enterPlan, exitPlan, includedIds, loadPlan, pendingProposalIds, proposalsOnDays, retainMoves, savePlan, stageMove, toggleSkip, type PlanSession, type StagedMove } from "./session";
+import { approveDisabled, conflictingMoveIds, enterPlan, exitPlan, includedIds, loadPlan, pendingProposalIds, proposalsOnDays, retainMoves, sameInstant, savePlan, stageMove, toggleSkip, type PlanSession, type StagedMove } from "./session";
 import { wrapWeekTitle } from "./titles";
 import { showUndo, type UndoToast } from "./undo";
 import "./v3.css";
@@ -107,6 +111,7 @@ interface Props {
   tasks: Task[];
   blocks: CalendarBlock[];
   proposals: Proposal[];
+  outbox: OutboxOperation[];
   loading: boolean;
   error: string | null;
   onRefresh: () => Promise<void>;
@@ -131,9 +136,17 @@ function atHour(dayKey: string, hour: number, timeZone: string): string | null {
 
 function eventLabel(event: CalEvent): string {
   const when = `${dayTitle(event.dayKey)}, ${rangeLabel(event.startHour, event.endHour)}`;
-  const state = event.state === "proposed" ? ", Proposed" : event.state === "done" ? ", Done" : "";
+  const state = event.state === "proposed"
+    ? ", Proposed"
+    : event.state === "unplaced"
+      ? ", Not on calendar"
+      : event.state === "done"
+        ? ", Done"
+        : "";
   return `${event.title}, ${when}${state}`;
 }
+
+const APPROVE_CLICK_SHIELD_MS = 700;
 
 export function CalendarShell(props: Props) {
   const timeZone = props.meta?.display_timezone || "America/Indianapolis";
@@ -177,6 +190,7 @@ export function CalendarShell(props: Props) {
   const [gesture, setGesture] = useState<Gesture>({ phase: "idle" });
   const [toast, setToast] = useState<UndoToast<null> | null>(null);
   const [undo, setUndo] = useState<(() => Promise<void>) | null>(null);
+  const [retry, setRetry] = useState<(() => Promise<void>) | null>(null);
   const [tip, setTip] = useState(false);
   const [glow, setGlow] = useState<string[]>([]);
   const [live, setLive] = useState("");
@@ -185,6 +199,13 @@ export function CalendarShell(props: Props) {
   const [width, setWidth] = useState(390);
   const [frame, setFrame] = useState(false);
   const [busy, setBusy] = useState(false);
+  const busyRef = useRef(false);
+  const quickInFlight = useRef(false);
+  const pendingQuick = useRef<{ event: CalEvent; start: string; end: string; acknowledgeFixed: boolean } | null>(null);
+  function setBusyFlag(value: boolean) {
+    busyRef.current = value;
+    setBusy(value);
+  }
   const gridRef = useRef<HTMLDivElement>(null);
   const originRef = useRef<DragOrigin | null>(null);
   const gestureRef = useRef<Gesture>({ phase: "idle" });
@@ -199,8 +220,8 @@ export function CalendarShell(props: Props) {
   propsRef.current = props;
 
   const serverEvents = useMemo(
-    () => buildEvents(props.tasks, props.blocks, props.proposals, timeZone),
-    [props.tasks, props.blocks, props.proposals, timeZone],
+    () => buildEvents(props.tasks, props.blocks, props.proposals, timeZone, props.outbox),
+    [props.tasks, props.blocks, props.proposals, props.outbox, timeZone],
   );
   const monday = PlanTime.mondayKey(anchor);
   const weekKeys = PlanTime.visibleDayKeys(monday, "week");
@@ -213,6 +234,7 @@ export function CalendarShell(props: Props) {
       const move = plan.active ? plan.moves.find((item) => item.id === event.id) : undefined;
       if (move) {
         const placed = withMove(event, move.to.start, move.to.end, timeZone);
+        if (event.state === "unplaced") return placed;
         return event.kind === "proposal" ? { ...placed, state: "approved" as const } : placed;
       }
       const override = overrides[event.id];
@@ -235,7 +257,7 @@ export function CalendarShell(props: Props) {
   const dayEvents = shown.filter((event) => event.dayKey === anchor);
   const weekEvents = shown.filter((event) => weekKeys.includes(event.dayKey));
   const rangeIds = pendingProposalIds(
-    proposalsOnDays(events, mode === "day" ? [anchor] : weekKeys).map((event) => event.id),
+    proposalsOnDays(baseEvents, mode === "day" ? [anchor] : weekKeys).map((event) => event.id),
     plan.moves,
   );
   const included = includedIds(rangeIds, plan.skipped);
@@ -248,6 +270,7 @@ export function CalendarShell(props: Props) {
     .map((id) => plan.moves.find((move) => move.id === id)?.title)
     .filter((title): title is string => Boolean(title))
     .join(", ");
+  const conflictLabel = conflictIds.length === 0 ? "" : width < 380 ? compactConflict(conflictIds.length) : `Changed · ${conflictText}`;
   const unsavedFits = bannerText(plan.moves.length, rangeIds.length, true).length < 42;
   const banner = bannerText(plan.moves.length, rangeIds.length, unsavedFits && plan.moves.length > 0 && rangeIds.length === 0);
   const loose = PlanBoard.sidebarTasks(props.tasks, props.blocks, props.proposals, "unscheduled", "");
@@ -256,6 +279,24 @@ export function CalendarShell(props: Props) {
     const tick = window.setInterval(() => setNow(new Date()), 30_000);
     return () => window.clearInterval(tick);
   }, []);
+
+  useEffect(() => {
+    setOverrides((current) => {
+      const ids = Object.keys(current);
+      if (ids.length === 0) return current;
+      let changed = false;
+      const next = { ...current };
+      for (const id of ids) {
+        const block = props.blocks.find((item) => item.id === id);
+        const span = current[id];
+        if (block && sameInstant(block.starts_at, span.start) && sameInstant(block.ends_at, span.end)) {
+          delete next[id];
+          changed = true;
+        }
+      }
+      return changed ? next : current;
+    });
+  }, [props.blocks]);
 
   useEffect(() => {
     const measure = () => {
@@ -315,6 +356,7 @@ export function CalendarShell(props: Props) {
     const timer = window.setTimeout(() => {
       setToast(null);
       setUndo(null);
+      setRetry(null);
     }, delay);
     return () => window.clearTimeout(timer);
   }, [toast]);
@@ -391,11 +433,12 @@ export function CalendarShell(props: Props) {
     window.setTimeout(() => setLive(message), 20);
   }
 
-  function pushToast(message: string, undoFn?: () => Promise<void>) {
+  function pushToast(message: string, undoFn?: () => Promise<void>, retryFn?: () => Promise<void>) {
     const token = toastToken.current + 1;
     toastToken.current = token;
     setToast(showUndo(message, null, Date.now(), token));
     setUndo(() => undoFn ?? null);
+    setRetry(() => retryFn ?? null);
     say(message);
   }
 
@@ -422,16 +465,49 @@ export function CalendarShell(props: Props) {
     }
   }
 
+  async function retryRefused(outboxId: string, title: string, start: string, end: string, failedMessage = refusedMoveToast(title), eventId?: string) {
+    setBusyFlag(true);
+    try {
+      const result = await calendar.retryOutbox(outboxId);
+      if (!calendarWriteLanded({ outbox: result.operation, block: result.block }, start, end)) {
+        pushToast(failedMessage, undefined, () => retryRefused(outboxId, title, start, end, failedMessage, eventId));
+        return;
+      }
+      if (eventId) {
+        setPlan((current) => retainMoves(current, current.moves.filter((move) => move.id !== eventId).map((move) => move.id)));
+      }
+      const part = PlanTime.parts(new Date(start), timeZone);
+      pushToast(quickToast(title, part.hour + part.minute / 60));
+      try {
+        await propsRef.current.onRefresh();
+      } catch {
+        /* The write landed. The next poll catches up. */
+      }
+    } catch (error) {
+      await fail(error);
+    } finally {
+      setBusyFlag(false);
+    }
+  }
+
   async function saveQuick(event: CalEvent, startIso: string, endIso: string, acknowledgeFixed = false) {
-    if (busy) return;
+    if (busyRef.current) {
+      // Keep a second quick drag. The Approve-all click shield is a separate guard and stays.
+      if (quickInFlight.current) {
+        pendingQuick.current = { event, start: startIso, end: endIso, acknowledgeFixed };
+        setOverrides((current) => ({ ...current, [event.id]: { start: startIso, end: endIso } }));
+      }
+      return;
+    }
+    quickInFlight.current = true;
     const original = { start: event.start, end: event.end };
     setOverrides((current) => ({ ...current, [event.id]: { start: startIso, end: endIso } }));
-    setBusy(true);
+    setBusyFlag(true);
     try {
       if (event.kind === "proposal") {
         const proposal = propsRef.current.proposals.find((item) => item.id === event.id);
         if (!proposal) return;
-        await calendar.move({
+        const saved = await calendar.move({
           kind: "proposal",
           title: event.title,
           startsAt: startIso,
@@ -439,18 +515,28 @@ export function CalendarShell(props: Props) {
           timeZone,
           proposal,
         });
-        const hour = withMove(event, startIso, endIso, timeZone).startHour;
-        pushToast(quickToast(event.title, hour), async () => {
-          await calendar.undo({
-            kind: "proposal",
-            title: event.title,
-            startsAt: original.start,
-            endsAt: original.end,
-            timeZone,
-            proposal,
+        if (!calendarWriteLanded(saved, startIso, endIso)) {
+          setOverrides((current) => {
+            const copy = { ...current };
+            delete copy[event.id];
+            return copy;
           });
-          await propsRef.current.onRefresh();
-        });
+          try {
+            await propsRef.current.onRefresh();
+          } catch {
+            /* The approval is on the server. The next poll draws it. */
+          }
+          const outboxId = saved.outbox?.id;
+          const missed = unplacedToast(event.title);
+          pushToast(
+            missed,
+            undefined,
+            outboxId ? () => retryRefused(outboxId, event.title, startIso, endIso, missed, event.id) : undefined,
+          );
+          return;
+        }
+        const hour = withMove(event, startIso, endIso, timeZone).startHour;
+        pushToast(quickToast(event.title, hour));
       } else {
         const block = propsRef.current.blocks.find((item) => item.id === event.id);
         if (!block) return;
@@ -463,6 +549,21 @@ export function CalendarShell(props: Props) {
           acknowledgeFixed,
           block,
         });
+        if (!calendarWriteLanded(saved, startIso, endIso)) {
+          setOverrides((current) => {
+            const copy = { ...current };
+            delete copy[event.id];
+            return copy;
+          });
+          const outboxId = saved.outbox?.id;
+          const title = event.title;
+          pushToast(
+            refusedMoveToast(title),
+            undefined,
+            outboxId ? () => retryRefused(outboxId, title, startIso, endIso, refusedMoveToast(title), event.id) : undefined,
+          );
+          return;
+        }
         const hour = withMove(event, startIso, endIso, timeZone).startHour;
         const message = quickToast(event.title, hour);
         const nextBlock = saved.block;
@@ -486,7 +587,11 @@ export function CalendarShell(props: Props) {
         rememberTip(message);
       }
       glowIds([event.id]);
-      await propsRef.current.onRefresh();
+      try {
+        await propsRef.current.onRefresh();
+      } catch {
+        return;
+      }
       setOverrides((current) => {
         const copy = { ...current };
         delete copy[event.id];
@@ -495,7 +600,11 @@ export function CalendarShell(props: Props) {
     } catch (error) {
       await fail(error);
     } finally {
-      setBusy(false);
+      quickInFlight.current = false;
+      const next = pendingQuick.current;
+      pendingQuick.current = null;
+      setBusyFlag(false);
+      if (next) void saveQuick(next.event, next.start, next.end, next.acknowledgeFixed);
     }
   }
 
@@ -774,32 +883,45 @@ export function CalendarShell(props: Props) {
     if (busy || approving.current || approveDisabled(plan.moves.length, included.length)) return;
     approving.current = true;
     const blocked = new Set(conflictIds);
-    const moves = [];
-    const approvals = [];
+    const moves: PlanMoveInput[] = [];
+    const approvals: PlanApprovalInput[] = [];
+    const sent = new Set<string>();
     for (const move of plan.moves) {
       if (blocked.has(move.id)) continue;
       const event = serverEvents.find((item) => item.id === move.id);
-      if (!event) continue;
-      if (event.kind === "proposal") {
+      const proposal = props.proposals.find((item) => item.id === move.id);
+      const times = proposal ? proposalTimes(proposal) : null;
+      const retry = Boolean(
+        move.kind === "proposal"
+        && proposal?.status === "approved"
+        && times?.starts_at
+        && times.ends_at
+        && sameInstant(times.starts_at, move.to.start)
+        && sameInstant(times.ends_at, move.to.end),
+      );
+      if (event?.kind === "proposal" || retry) {
         approvals.push({
-          proposalId: event.id,
+          proposalId: move.id,
           expectedVersion: move.version,
           startsAt: move.to.start,
           endsAt: move.to.end,
         });
-      } else {
-        moves.push({
-          blockId: event.id,
-          expectedVersion: move.version,
-          startsAt: move.to.start,
-          endsAt: move.to.end,
-          idempotencyKey: move.key,
-          title: move.title || event.title,
-          acknowledgeFixedMove: event.fixed,
-        });
+        sent.add(move.id);
+        continue;
       }
+      if (!event) continue;
+      moves.push({
+        blockId: event.id,
+        expectedVersion: move.version,
+        startsAt: move.to.start,
+        endsAt: move.to.end,
+        idempotencyKey: move.key,
+        title: move.title || event.title,
+        acknowledgeFixedMove: event.fixed,
+      });
+      sent.add(move.id);
     }
-    const missing = plan.moves.filter((move) => !serverEvents.some((event) => event.id === move.id));
+    const missing = plan.moves.filter((move) => !blocked.has(move.id) && !sent.has(move.id));
     for (const id of included) {
       if (approvals.some((item) => item.proposalId === id)) continue;
       const event = serverEvents.find((item) => item.id === id);
@@ -812,7 +934,7 @@ export function CalendarShell(props: Props) {
       pushToast(conflictText ? `${conflictText} changed, so nothing was saved.` : "Nothing to approve.");
       return;
     }
-    setBusy(true);
+    setBusyFlag(true);
     try {
       const committed = await calendar.commitPlan({ moves, approvals });
       const savedIds = new Set(
@@ -832,36 +954,77 @@ export function CalendarShell(props: Props) {
         ...committed.approvals.filter((item) => !item.saved).map((item) => plan.moves.find((move) => move.id === item.id)?.title || item.title || "A proposal"),
         ...missing.map((move) => move.title),
       ];
-      const message = unsavedTitles.length > 0
+      const confirmed = committed.confirmed;
+      const held = plan.moves.filter((move) => blocked.has(move.id)).map((move) => move.title);
+      const savedNote = unsavedTitles.length > 0
         ? partialPlanToast(savedMoves + savedProposals, savedMoves + savedProposals + unsavedTitles.length, unsavedTitles)
-        : committed.confirmed
-          ? approvedToast(savedMoves, savedProposals)
+        : confirmed
+          ? approvedToast(savedMoves, savedProposals, held)
           : SAVED_REFRESH;
+      const message = unsavedTitles.length > 0 && held.length > 0 ? `${savedNote} · ${held.join(", ")} changed` : savedNote;
       if (savedMoves + savedProposals > 0) {
         glowIds([...committed.moves, ...committed.approvals].filter((item) => item.saved).map((item) => item.id));
       }
-      pushToast(message);
-      if (committed.confirmed) await propsRef.current.onRefresh();
+      const failedWrites = [...committed.moves, ...committed.approvals].flatMap((item) => {
+        const outboxId = item.outbox?.id;
+        if (item.saved || !outboxId) return [];
+        const move = plan.moves.find((entry) => entry.id === item.id);
+        const proposal = props.proposals.find((entry) => entry.id === item.id);
+        const proposalSpan = proposal ? proposalTimes(proposal) : null;
+        const start = move?.to.start || proposalSpan?.starts_at;
+        const end = move?.to.end || proposalSpan?.ends_at;
+        if (!start || !end) return [];
+        const title = move?.title || item.title || "A move";
+        const proposalWrite = move?.kind === "proposal" || (!move && Boolean(proposal));
+        const missed = proposalWrite ? unplacedToast(title) : refusedMoveToast(title);
+        return [{ outboxId, title, start, end, missed, eventId: item.id }];
+      });
+      const retryFailed = failedWrites.length
+        ? async () => {
+            for (const item of failedWrites) {
+              await retryRefused(item.outboxId, item.title, item.start, item.end, item.missed, item.eventId);
+            }
+          }
+        : undefined;
+      pushToast(message, undefined, retryFailed);
+      if (confirmed) await propsRef.current.onRefresh();
     } catch (error) {
       if (error instanceof ApiError && error.code === "version_conflict") setOverlay(null);
       await fail(error);
     } finally {
       approving.current = false;
-      setBusy(false);
+      setBusyFlag(false);
     }
   }
 
   async function decide(event: CalEvent, action: "approve" | "deny") {
     const proposal = props.proposals.find((item) => item.id === event.id);
     if (!proposal || busy) return;
-    setBusy(true);
+    setBusyFlag(true);
     try {
       if (action === "deny") {
         await calendar.decide(proposal, "deny");
         pushToast(denyToast(event.title));
       } else {
-        await calendar.decide(proposal, "approve");
-        pushToast(`Approved ${event.title}.`);
+        const saved = await calendar.decide(proposal, "approve");
+        const times = proposalTimes(proposal);
+        if (!times.starts_at || !times.ends_at || !calendarWriteLanded(saved, times.starts_at, times.ends_at)) {
+          const outboxId = saved.outbox?.id;
+          const missed = unplacedToast(event.title);
+          setOverlay(null);
+          try {
+            await propsRef.current.onRefresh();
+          } catch {
+            /* The approval is on the server. The next poll draws it. */
+          }
+          pushToast(
+            missed,
+            undefined,
+            outboxId ? () => retryRefused(outboxId, event.title, times.starts_at || event.start, times.ends_at || event.end, missed, event.id) : undefined,
+          );
+          return;
+        }
+        pushToast(`Approved ${event.title}`);
         glowIds([event.id]);
       }
       setOverlay(null);
@@ -869,7 +1032,7 @@ export function CalendarShell(props: Props) {
     } catch (error) {
       await fail(error);
     } finally {
-      setBusy(false);
+      setBusyFlag(false);
     }
   }
 
@@ -880,11 +1043,25 @@ export function CalendarShell(props: Props) {
   }
 
   function revertAll() {
+    const stranded = plan.moves.flatMap((move) => {
+      if (move.kind !== "proposal") return [];
+      const proposal = props.proposals.find((item) => item.id === move.id);
+      if (!proposal || proposal.status !== "approved") return [];
+      const times = proposalTimes(proposal);
+      const taskId = String((proposal.edited_payload || proposal.payload).task_id || "");
+      const landed = props.blocks.some((block) => (
+        block.status === "scheduled"
+        && (block.task_id || "") === taskId
+        && sameInstant(block.starts_at, move.to.start)
+        && sameInstant(block.ends_at, move.to.end)
+      ));
+      return landed || !times.starts_at ? [] : [move.title];
+    });
     const ids = plan.moves.map((move) => move.id);
     setPlan(exitPlan());
     setOverlay(null);
     glowIds(ids);
-    pushToast(REVERT_TOAST);
+    pushToast(revertToast(stranded));
   }
 
   const lifted = gesture.phase === "lifted";
@@ -909,12 +1086,14 @@ export function CalendarShell(props: Props) {
       {plan.active ? (
         <PlanBanner
           count={plan.moves.length}
+          suggestions={rangeIds.length}
           text={banner}
           live={lifted && liveParts != null}
           liveTitle={liveParts?.title ?? ""}
           liveWhen={liveParts?.when ?? ""}
           crossing={lifted && crossing}
-          conflict={conflictText ? `Changed · ${conflictText}` : ""}
+          conflict={conflictLabel}
+          compact={width < 380}
           onExit={() => { setPlan(exitPlan()); setOverlay(null); }}
           onRevert={() => setOverlay({ kind: "revert" })}
           onReview={() => setOverlay({ kind: "review" })}
@@ -1068,7 +1247,8 @@ export function CalendarShell(props: Props) {
           <div className="toast" data-testid="plan-toast" role="status">
             <ToastIcon message={toast.message} />
             <ToastCopy message={toast.message} />
-            {undo ? <button type="button" onClick={() => { const run = undo; setToast(null); setUndo(null); void run(); }}>Undo</button> : null}
+            {undo ? <button type="button" onClick={() => { const run = undo; setToast(null); setUndo(null); setRetry(null); void run(); }}>Undo</button> : null}
+            {retry ? <button type="button" onClick={() => { const run = retry; setToast(null); setUndo(null); setRetry(null); void run(); }}>Retry</button> : null}
           </div>
         ) : null}
       </div>
@@ -1102,6 +1282,11 @@ export function CalendarShell(props: Props) {
           event={events.find((item) => item.id === overlay.id) ?? serverEvents.find((item) => item.id === overlay.id) ?? null}
           onClose={() => setOverlay(null)}
           onDecide={decide}
+          onRetry={(event) => {
+            if (!event.outboxId) return;
+            setOverlay(null);
+            void retryRefused(event.outboxId, event.title, event.start, event.end, unplacedToast(event.title), event.id);
+          }}
           onTime={() => pushToast("Drag the block to change the time.")}
         />
       ) : null}
@@ -1209,7 +1394,12 @@ function StatusBar({ framed, time, timeZone }: { framed: boolean; time: Date; ti
 }
 
 function toastKind(message: string): "info" | "plain" | "ok" {
-  if (message.includes("still in plan")) return "info";
+  if (
+    message.includes("still in plan")
+    || message.includes(" changed")
+    || message.includes("didn't move")
+    || message.includes("not on calendar")
+  ) return "info";
   if (message.startsWith("Reverted") || message.startsWith("Denied")) return "plain";
   return "ok";
 }
@@ -1223,31 +1413,43 @@ function ToastIcon(props: { message: string }) {
   );
 }
 
-function ToastCopy(props: { message: string }) {
-  const marker = " still in plan";
-  const at = props.message.lastIndexOf(marker);
-  if (at < 0) return <p>{props.message}</p>;
-  const head = props.message.slice(0, at);
+const STATUS_TAILS = [" still in plan", " not on calendar", " changed"];
+
+function toastParts(message: string): { count: string; name: string; keep: string } | null {
+  if (message.includes("changed, so nothing was saved")) return null;
+  const tail = STATUS_TAILS.find((item) => message.endsWith(item));
+  if (!tail) return null;
+  const head = message.slice(0, -tail.length);
   const dot = head.lastIndexOf(" · ");
-  const count = dot < 0 ? "" : `${head.slice(0, dot)} · `;
-  const name = (dot < 0 ? head : head.slice(dot + 3)).trim();
+  if (dot < 0) return { count: "", name: head.trim(), keep: tail };
+  const left = head.slice(0, dot).trim();
+  const right = head.slice(dot + 3).trim();
+  if (!right) return { count: "", name: left, keep: ` ·${tail}` };
+  return { count: `${left} · `, name: right, keep: tail };
+}
+
+function ToastCopy(props: { message: string }) {
+  const parts = toastParts(props.message);
+  if (!parts) return <p>{props.message}</p>;
   return (
     <p className="partial-line">
-      {count ? <span className="partial-count">{count}</span> : null}
-      {name ? <span className="partial-name">{name}</span> : null}
-      <span className="partial-keep" data-testid="toast-keep"> still in plan</span>
+      {parts.count ? <span className="partial-count">{parts.count}</span> : null}
+      {parts.name ? <span className="partial-name">{parts.name}</span> : null}
+      <span className="partial-keep" data-testid="toast-keep">{parts.keep}</span>
     </p>
   );
 }
 
 function PlanBanner(props: {
   count: number;
+  suggestions: number;
   text: string;
   live: boolean;
   liveTitle: string;
   liveWhen: string;
   crossing: boolean;
   conflict: string;
+  compact: boolean;
   onExit: () => void;
   onRevert: () => void;
   onReview: () => void;
@@ -1262,11 +1464,19 @@ function PlanBanner(props: {
             <span className="banner-title">{props.liveTitle}</span>
             <span className="banner-when"> · {props.liveWhen}</span>
           </p>
+        ) : props.conflict && props.compact ? (
+          <p data-testid="plan-conflict">{props.conflict}</p>
         ) : <p>{props.text}</p>}
-        {props.conflict ? <p data-testid="plan-conflict">{props.conflict}</p> : null}
+        {props.conflict && !props.compact ? <p data-testid="plan-conflict">{props.conflict}</p> : null}
       </div>
       {props.live && props.crossing ? <span className="tag">Crosses work hours</span> : null}
-      {!props.live && props.count === 0 ? <button type="button" className="ghost-btn" onClick={props.onExit}>Exit</button> : null}
+      {!props.live && props.count === 0 && props.suggestions === 0 ? <button type="button" className="ghost-btn" onClick={props.onExit}>Exit</button> : null}
+      {!props.live && props.count === 0 && props.suggestions > 0 ? (
+        <div className="banner-actions">
+          <button type="button" className="ghost-btn" onClick={props.onExit}>Exit</button>
+          <button type="button" className="solid-btn" onClick={props.onReview}>Review</button>
+        </div>
+      ) : null}
       {!props.live && props.count > 0 ? (
         <div className="banner-actions">
           <button type="button" className="ghost-btn" onClick={props.onRevert}>Revert</button>
@@ -1302,6 +1512,17 @@ function settleMotion(settle: Settle | null, id: string): { className: string; s
       bottom: "auto",
     },
   };
+}
+
+function calendarWriteLanded(
+  saved: { outbox: { status?: string } | null; block: { starts_at: string; ends_at: string } | null },
+  start: string,
+  end: string,
+): boolean {
+  const status = saved.outbox?.status;
+  if (status !== "simulated" && status !== "synced") return false;
+  if (!saved.block) return false;
+  return sameInstant(saved.block.starts_at, start) && sameInstant(saved.block.ends_at, end);
 }
 
 function proposalTimes(proposal: Proposal): { status: string; starts_at?: string; ends_at?: string } {
@@ -1453,18 +1674,18 @@ function EventButton(props: {
           top: box.y - tap.y,
           width: box.w,
           height: box.h,
-          backgroundColor: event.state === "proposed" ? "color-mix(in srgb, currentColor 12%, transparent)" : event.state === "done" ? "#16181b" : fill(event.domain),
-          color: event.state === "proposed" ? line(event.domain) : event.state === "done" ? undefined : text(event.domain),
+          backgroundColor: event.state === "proposed" || event.state === "unplaced" ? "color-mix(in srgb, currentColor 12%, transparent)" : event.state === "done" ? "#16181b" : fill(event.domain),
+          color: event.state === "proposed" || event.state === "unplaced" ? line(event.domain) : event.state === "done" ? undefined : text(event.domain),
           ...motion.style,
         }}
       >
         {event.state === "approved" || event.state === "done" ? <i className="bar" style={{ background: line(event.domain) }} /> : null}
-        <i className="dash" data-on={event.state === "proposed" ? "1" : "0"} />
+        <i className="dash" data-on={event.state === "proposed" || event.state === "unplaced" ? "1" : "0"} />
         <span className="body">
           {event.state === "done" ? <span className="done-check"><CheckGlyph /></span> : null}
           <strong>{event.title}</strong>
-          {one && !(props.lifted && box.w < 200) ? <span>{time}</span> : null}
-          {!one ? <span>{time}{event.state === "proposed" ? " · Proposed" : ""}</span> : null}
+          {one && !(props.lifted && box.w < 200) ? <span>{event.state === "unplaced" ? `${clockMinutes(event.startHour)} · Not on calendar` : time}</span> : null}
+          {!one ? <span>{event.state === "unplaced" ? `${clockMinutes(event.startHour)} · Not on calendar` : `${time}${event.state === "proposed" ? " · Proposed" : ""}`}</span> : null}
         </span>
       </span>
       {event.state === "proposed" ? (
@@ -1553,13 +1774,13 @@ function WeekCanvas(props: {
               className={`face ${event.state} ${props.glow.includes(event.id) ? "glow" : ""} ${props.openId === event.id ? "open" : ""} ${locked} ${motion.className}`}
               style={{
                 ...WEEK_FACE_REST,
-                backgroundColor: event.state === "proposed" ? "color-mix(in srgb, currentColor 12%, transparent)" : fill(event.domain),
-                color: event.state === "proposed" ? line(event.domain) : text(event.domain),
+                backgroundColor: event.state === "proposed" || event.state === "unplaced" ? "color-mix(in srgb, currentColor 12%, transparent)" : fill(event.domain),
+                color: event.state === "proposed" || event.state === "unplaced" ? line(event.domain) : text(event.domain),
                 ...motion.style,
               }}
             >
               {event.state === "approved" ? <i className="bar" style={{ background: line(event.domain) }} /> : null}
-              <i className="dash" data-on={event.state === "proposed" ? "1" : "0"} />
+              <i className="dash" data-on={event.state === "proposed" || event.state === "unplaced" ? "1" : "0"} />
               <span className="body" style={{ top: 2, right: 1, bottom: 2, left: 4, justifyContent: "flex-start" }}>
                 {lines.lines.map((lineText) => (
                   <strong key={lineText} className="week-title">{lineText}</strong>
@@ -1687,6 +1908,7 @@ function EventSheet(props: {
   event: CalEvent | null;
   onClose: () => void;
   onDecide: (event: CalEvent, action: "approve" | "deny") => void;
+  onRetry: (event: CalEvent) => void;
   onTime: () => void;
 }) {
   const event = props.event;
@@ -1700,12 +1922,15 @@ function EventSheet(props: {
           <span className="proposed-chip" style={{ color: line(event.domain) }}><Sparkle /> Proposed</span>
         ) : null}
       </div>
-      <p className="sub">{event.state === "proposed" ? `Agent suggestion · ${domainLabel(event.domain)}` : domainLabel(event.domain)}</p>
+      <p className="sub">{event.state === "unplaced" ? "Not on calendar" : event.state === "proposed" ? `Agent suggestion · ${domainLabel(event.domain)}` : domainLabel(event.domain)}</p>
       <button type="button" className="time-row" onClick={props.onTime}>
         <span>{dayTitle(event.dayKey)}</span>
         <span>{rangeLabel(event.startHour, event.endHour)} ›</span>
       </button>
       {event.explanation ? <p className="why">Why: {event.explanation}</p> : null}
+      {event.state === "unplaced" ? (
+        <button type="button" className="quiet" data-testid="unplaced-retry" onClick={() => props.onRetry(event)}>Retry</button>
+      ) : null}
       {event.state === "proposed" ? (
         <div className="pair">
           <button type="button" className="no" onClick={() => props.onDecide(event, "deny")}>Deny</button>
@@ -1714,6 +1939,17 @@ function EventSheet(props: {
       ) : null}
     </div>
   );
+}
+
+function armApproveClickShield() {
+  const stop = (event: Event) => {
+    const target = event.target;
+    if (!(target instanceof Element) || !target.closest(".block")) return;
+    event.preventDefault();
+    event.stopImmediatePropagation();
+  };
+  document.addEventListener("click", stop, true);
+  window.setTimeout(() => document.removeEventListener("click", stop, true), APPROVE_CLICK_SHIELD_MS);
 }
 
 function ReviewSheet(props: {
@@ -1750,7 +1986,7 @@ function ReviewSheet(props: {
               <small style={{ display: "block", color: "var(--t2)" }}>{dayName(from.dayKey)} {clock(from.startHour)} → {dayName(to.dayKey)} {clock(to.startHour)}</small>
             </span>
             {crosses ? <span className="tag">Crosses work hours</span> : null}
-            {props.conflicts.includes(move.id) ? <span className="tag">Changed</span> : null}
+            {props.conflicts.includes(move.id) ? <span className="tag" data-testid="changed-tag">Changed</span> : null}
           </div>
         );
       })}
@@ -1770,7 +2006,7 @@ function ReviewSheet(props: {
           </div>
         );
       })}
-      <button type="button" className="primary" data-testid="approve-all" disabled={props.disabled} onClick={props.onApprove}>{props.label}</button>
+      <button type="button" className="primary" data-testid="approve-all" disabled={props.disabled} onPointerDown={armApproveClickShield} onClick={props.onApprove}>{props.label}</button>
       <button type="button" className="quiet" onClick={props.onKeep}>Keep planning</button>
     </div>
   );

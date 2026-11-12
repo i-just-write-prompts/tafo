@@ -25,6 +25,7 @@ from tafo.decisions import (
     list_proposals,
     reject_proposal,
     stage_approval,
+    undo_block_approval,
 )
 from tafo.migrate import apply_migrations
 from tafo.outbox import list_outbox, process_outbox, serialize_outbox
@@ -114,6 +115,24 @@ def _actor(request: Request) -> str:
     return raw
 
 
+_WRITE_ORIGINS = {
+    "http://127.0.0.1:5173",
+    "http://localhost:5173",
+    "http://127.0.0.1:5174",
+    "http://localhost:5174",
+    "http://127.0.0.1:4173",
+    "http://localhost:4173",
+}
+
+
+def _origin_allowed(origin: str, host: str | None) -> bool:
+    if origin in _WRITE_ORIGINS:
+        return True
+    if not host:
+        return False
+    return origin.split("://", 1)[-1] == host
+
+
 def _require_human(request: Request) -> str:
     actor = _actor(request)
     if actor == "agent":
@@ -201,7 +220,7 @@ def create_app(settings: Settings | None = None, adapter: CalendarAdapter | None
     if adapter is None:
         adapter = build_adapter(settings)
     demo_faults = None
-    if settings.calendar_mode == "demo":
+    if settings.e2e and settings.calendar_mode == "demo":
         demo_faults = DemoFaults(adapter)
         adapter = demo_faults
     ui_session_token = UiSession.mint()
@@ -238,7 +257,7 @@ def create_app(settings: Settings | None = None, adapter: CalendarAdapter | None
     if demo_faults is not None:
         @app.post("/api/e2e/fail-writes", tags=["e2e"])
         def fail_writes(body: dict, request: Request) -> dict:
-            """Arm the next demo calendar write to fail. Absent unless calendar mode is demo."""
+            """Arm the next demo calendar write to fail. Absent unless TAFO_E2E=1."""
             _require_human(request)
             keys = body.get("event_keys") or []
             demo_faults.fail_keys.update(str(key) for key in keys)
@@ -256,6 +275,33 @@ def create_app(settings: Settings | None = None, adapter: CalendarAdapter | None
         allow_methods=["*"],
         allow_headers=["*"],
     )
+
+    @app.middleware("http")
+    async def guard_mutations(request: Request, call_next):
+        if request.method not in {"POST", "PUT", "PATCH", "DELETE"}:
+            return await call_next(request)
+        site = (request.headers.get("sec-fetch-site") or "").strip().lower()
+        if site == "cross-site":
+            return JSONResponse(
+                status_code=403,
+                content={"detail": {"code": "cross_site", "message": "Cross-site writes are refused."}},
+            )
+        origin = (request.headers.get("origin") or "").strip()
+        if origin and not _origin_allowed(origin, request.headers.get("host")):
+            return JSONResponse(
+                status_code=403,
+                content={"detail": {"code": "bad_origin", "message": "This origin cannot write."}},
+            )
+        length = request.headers.get("content-length")
+        has_body = bool(request.headers.get("transfer-encoding")) or (length is not None and length not in {"", "0"})
+        if has_body:
+            media = (request.headers.get("content-type") or "").split(";", 1)[0].strip().lower()
+            if media != "application/json":
+                return JSONResponse(
+                    status_code=415,
+                    content={"detail": {"code": "json_required", "message": "Send application/json."}},
+                )
+        return await call_next(request)
 
     @app.middleware("http")
     async def require_loopback_host(request: Request, call_next):
@@ -561,6 +607,20 @@ def create_app(settings: Settings | None = None, adapter: CalendarAdapter | None
             payload=body.payload,
             actor="human",
         )
+
+    @app.post("/api/decisions/{proposal_id}/undo", tags=["decisions"])
+    def post_undo(proposal_id: str, body: DecisionBody, request: Request) -> dict:
+        """Refuse to undo an approval. The proposal and its blocks stay as they are."""
+        _require_decision(request)
+        _require_confirmed(body.confirmed)
+        with session(settings.db_path) as conn:
+            return undo_block_approval(
+                conn,
+                settings,
+                proposal_id,
+                expected_version=body.expected_version,
+                actor="human",
+            )
 
     @app.post("/api/decisions/{proposal_id}/reject", tags=["decisions"])
     def post_reject(proposal_id: str, body: DecisionBody, request: Request) -> dict:

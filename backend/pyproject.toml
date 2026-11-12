@@ -8,7 +8,7 @@ version = "0.1.0"
 description = "Task Around and Find Out — personal task and time-block MVP"
 requires-python = ">=3.11"
 dependencies = [
-  "fastapi>=0.115.0",
+  "fastapi>=0.132",
   "uvicorn>=0.32.0",
   "pydantic>=2.10.0",
   "tzdata>=2024.1",

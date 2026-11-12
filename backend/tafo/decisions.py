@@ -423,6 +423,28 @@ def reject_proposal(
     return updated
 
 
+def undo_block_approval(
+    conn: sqlite3.Connection,
+    settings: Settings,
+    proposal_id: str,
+    *,
+    expected_version: int,
+    actor: str,
+) -> dict:
+    """Refuse to undo an approval.
+
+    Reopening the proposal would let the next approval replay a cancelled create,
+    and a task-wide cancel would delete a different block. Nothing is written.
+    """
+    del settings, expected_version, actor
+    row = conn.execute("SELECT * FROM proposals WHERE id = ?", (proposal_id,)).fetchone()
+    if row is None:
+        raise Problem(404, "not_found", "Proposal not found.")
+    if row["status"] == "approved":
+        raise Problem(409, "undo_refused", "An approval cannot be undone.")
+    raise Problem(409, "not_approved", "Only an approved calendar suggestion can be undone.")
+
+
 def _apply_task(conn: sqlite3.Connection, payload: dict, acknowledge_task_drift: bool, actor: str) -> None:
     if payload["op"] == "create":
         create_task(conn, payload["task"], actor=actor)

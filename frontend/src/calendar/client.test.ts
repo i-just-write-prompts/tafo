@@ -145,9 +145,12 @@ describe("CalendarClient", () => {
     expect(saved.idempotentReplay).toBe(false);
   });
 
-  it("moves a pending proposal by editing it, and undoes at the next version", async () => {
+  it("moves a pending proposal by editing it, approving it, and undoes at the next version", async () => {
     const transport = recording((path) => {
       if (path === "/api/decisions/prp_budget/edit") return proposal({ version: 3 });
+      if (path === "/api/decisions/prp_budget/approve") {
+        return { proposal: proposal({ version: 4, status: "approved" }), outbox: { status: "simulated" }, block: null, idempotent_replay: false };
+      }
       throw new Error(path);
     });
     const client = createCalendarClient({ transport });
@@ -168,12 +171,13 @@ describe("CalendarClient", () => {
       timeZone: "America/Indianapolis",
       proposal: original,
     });
-    const [moved, undone] = callsOf(transport);
+    const [moved, approved, undone] = callsOf(transport);
     expect(moved?.body).toMatchObject({
       expected_version: 2,
       confirmed: true,
       payload: { starts_at: "2026-11-10T19:00:00Z", ends_at: "2026-11-10T20:00:00Z", title: "Budget sheet" },
     });
+    expect(approved?.path).toBe("/api/decisions/prp_budget/approve");
     expect(undone?.body).toMatchObject({
       expected_version: 3,
       confirmed: true,

@@ -17,7 +17,7 @@ def local(day: int, hour: int, minute: int = 0) -> str:
     return moment.astimezone(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
 
-def settings_for(tmp_path) -> Settings:
+def settings_for(tmp_path, e2e: bool = False) -> Settings:
     return Settings(
         host="127.0.0.1",
         port=8787,
@@ -30,11 +30,12 @@ def settings_for(tmp_path) -> Settings:
         work_invite_email="",
         allow_lan=False,
         seed_demo=False,
+        e2e=e2e,
     )
 
 
-def open_week(tmp_path):
-    settings = settings_for(tmp_path)
+def open_week(tmp_path, e2e: bool = False):
+    settings = settings_for(tmp_path, e2e=e2e)
     V3Week.load(settings.db_path)
     app = create_app(settings)
     client = TestClient(app)
@@ -511,8 +512,94 @@ def test_r5_unsynced_moved_proposal_does_not_block_healthy_moves(tmp_path):
         client.__exit__(None, None, None)
 
 
-def test_demo_fail_writes_endpoint_fails_one_update_and_live_omits_it(tmp_path):
+def test_r6_mismatched_or_denied_proposal_retries_are_409(tmp_path):
     client = open_week(tmp_path)
+    try:
+        budget = proposal_named(client, "Budget sheet")
+        spec = block_named(client, "Spec review")
+        closet = proposal_named(client, "Fix closet door")
+        original = spec["starts_at"]
+        moved = local(1, 15)
+        moved_end = local(1, 16, 30)
+        approved = client.post(
+            "/api/decisions/plan/commit",
+            json={
+                "confirmed": True,
+                "moves": [],
+                "approvals": [{
+                    "proposal_id": budget["id"],
+                    "expected_version": budget["version"],
+                    "starts_at": moved,
+                    "ends_at": moved_end,
+                }],
+            },
+        )
+        assert approved.status_code == 200, approved.text
+        mismatch = client.post(
+            "/api/decisions/plan/commit",
+            json={
+                "confirmed": True,
+                "moves": [{
+                    "block_id": spec["id"],
+                    "expected_version": spec["version"],
+                    "starts_at": local(2, 9, 30),
+                    "ends_at": local(2, 11),
+                    "idempotency_key": "v3-r6-mismatch-spec",
+                    "title": "Spec review",
+                }],
+                "approvals": [{
+                    "proposal_id": budget["id"],
+                    "expected_version": budget["version"],
+                    "starts_at": local(1, 16),
+                    "ends_at": local(1, 17, 30),
+                }],
+            },
+        )
+        assert mismatch.status_code == 409, mismatch.text
+        assert mismatch.json()["detail"]["code"] == "not_pending"
+        assert block_named(client, "Spec review")["starts_at"] == original
+        task_id = budget["payload"]["task_id"]
+        written = [
+            row for row in client.get("/api/calendar/blocks").json()["blocks"]
+            if row["task_id"] == task_id and row["status"] == "scheduled"
+        ]
+        assert any(row["starts_at"] == moved for row in written)
+        assert not any(row["starts_at"] == local(1, 16) for row in written)
+        rejected = client.post(
+            f"/api/decisions/{closet['id']}/reject",
+            json={"expected_version": closet["version"], "confirmed": True, "note": "No"},
+        )
+        assert rejected.status_code == 200, rejected.text
+        denied = client.post(
+            "/api/decisions/plan/commit",
+            json={
+                "confirmed": True,
+                "moves": [],
+                "approvals": [{
+                    "proposal_id": closet["id"],
+                    "expected_version": closet["version"],
+                    "starts_at": local(1, 18),
+                    "ends_at": local(1, 19),
+                }],
+            },
+        )
+        assert denied.status_code == 409, denied.text
+        assert denied.json()["detail"]["code"] == "not_pending"
+        assert proposal_named(client, "Fix closet door")["status"] == "rejected"
+    finally:
+        client.__exit__(None, None, None)
+
+
+def test_demo_fail_writes_endpoint_fails_one_update_and_live_omits_it(tmp_path):
+    quiet = open_week(tmp_path)
+    try:
+        missing = quiet.post("/api/e2e/fail-writes", json={"event_keys": ["blk_v3_spec"]})
+        assert missing.status_code == 404
+    finally:
+        quiet.__exit__(None, None, None)
+    armed = tmp_path / "armed"
+    armed.mkdir()
+    client = open_week(armed, e2e=True)
     try:
         spec = block_named(client, "Spec review")
         armed = client.post("/api/e2e/fail-writes", json={"event_keys": [spec["id"]], "fail_creates": 1})
@@ -564,5 +651,97 @@ def test_commit_refuses_an_empty_plan(tmp_path):
         response = client.post("/api/decisions/plan/commit", json={"confirmed": True, "moves": [], "approvals": []})
         assert response.status_code == 400
         assert response.json()["detail"]["code"] == "empty_plan"
+    finally:
+        client.__exit__(None, None, None)
+
+
+def test_undo_of_an_approval_is_refused_and_leaves_state_unchanged(tmp_path):
+    """Approving a suggestion cannot be undone. The proposal and its block stay as they are."""
+    client = open_week(tmp_path)
+    try:
+        budget = proposal_named(client, "Budget sheet")
+        approved = client.post(
+            f"/api/decisions/{budget['id']}/approve",
+            json={"expected_version": budget["version"], "confirmed": True},
+        )
+        assert approved.status_code == 200, approved.text
+        proposal = approved.json()["proposal"]
+        assert proposal["status"] == "approved"
+        task_id = (proposal.get("edited_payload") or proposal["payload"])["task_id"]
+        blocks = client.get("/api/calendar/blocks").json()["blocks"]
+        landed = [row for row in blocks if row["task_id"] == task_id and row["status"] == "scheduled"]
+        assert len(landed) == 1
+        undone = client.post(
+            f"/api/decisions/{budget['id']}/undo",
+            json={"expected_version": proposal["version"], "confirmed": True},
+        )
+        assert undone.status_code == 409, undone.text
+        again = proposal_named(client, "Budget sheet")
+        assert again["status"] == "approved"
+        assert again["version"] == proposal["version"]
+        assert again["edited_payload"] == proposal.get("edited_payload")
+        after = client.get("/api/calendar/blocks").json()["blocks"]
+        still = next(row for row in after if row["id"] == landed[0]["id"])
+        assert still["status"] == "scheduled"
+        assert still["starts_at"] == landed[0]["starts_at"]
+        assert still["ends_at"] == landed[0]["ends_at"]
+        assert still["version"] == landed[0]["version"]
+    finally:
+        client.__exit__(None, None, None)
+
+
+def test_undo_of_an_unsynced_approval_does_not_cancel_other_blocks(tmp_path):
+    """A refused undo must not cancel a different block that shares the task."""
+    import sqlite3
+
+    client = open_week(tmp_path, e2e=True)
+    try:
+        budget = proposal_named(client, "Budget sheet")
+        task_id = budget["payload"]["task_id"]
+        armed = client.post("/api/e2e/fail-writes", json={"event_keys": [], "fail_creates": 1})
+        assert armed.status_code == 200, armed.text
+        now = "2026-11-10T15:40:00Z"
+        with sqlite3.connect(tmp_path / "tafo.sqlite") as conn:
+            conn.execute(
+                """
+                INSERT INTO calendar_blocks (
+                  id, task_id, origin_proposal_id, title, description, starts_at, ends_at, domain,
+                  invite_work_email, fixed, status, sync_state, written_mode, honest_label,
+                  google_event_id, version, created_at, updated_at
+                ) VALUES (?, ?, NULL, ?, '', ?, ?, 'work', 0, 0, 'scheduled', 'simulated', 'demo', ?, NULL, 1, ?, ?)
+                """,
+                (
+                    "blk_probe_other",
+                    task_id,
+                    "Other session",
+                    "2026-11-10T18:00:00Z",
+                    "2026-11-10T19:00:00Z",
+                    "Simulated dry-run. NOT synced to Google Calendar. No invitation was sent.",
+                    now,
+                    now,
+                ),
+            )
+        approved = client.post(
+            f"/api/decisions/{budget['id']}/approve",
+            json={"expected_version": budget["version"], "confirmed": True},
+        )
+        assert approved.status_code == 200, approved.text
+        proposal = approved.json()["proposal"]
+        assert proposal["status"] == "approved"
+        assert approved.json()["block"] is None
+        undone = client.post(
+            f"/api/decisions/{budget['id']}/undo",
+            json={"expected_version": proposal["version"], "confirmed": True},
+        )
+        assert undone.status_code == 409, undone.text
+        again = proposal_named(client, "Budget sheet")
+        assert again["status"] == "approved"
+        assert again["version"] == proposal["version"]
+        after = client.get("/api/calendar/blocks").json()["blocks"]
+        other = next(row for row in after if row["id"] == "blk_probe_other")
+        assert other["status"] == "scheduled"
+        assert other["starts_at"] == "2026-11-10T18:00:00Z"
+        cancelled = [row for row in after if row["task_id"] == task_id and row["status"] == "cancelled"]
+        assert cancelled == []
     finally:
         client.__exit__(None, None, None)

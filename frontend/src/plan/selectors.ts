@@ -31,7 +31,7 @@ export class PlanBoard {
       if (block.status === "scheduled" && block.task_id) ids.add(block.task_id);
     }
     for (const proposal of proposals) {
-      if (proposal.status !== "pending") continue;
+      if (proposal.status !== "pending" && proposal.status !== "approved") continue;
       if (proposal.kind !== "calendar_block" && proposal.kind !== "calendar_update") continue;
       const taskId = PlanBoard.payload(proposal).task_id;
       if (typeof taskId === "string" && taskId) ids.add(taskId);

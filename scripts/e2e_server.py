@@ -64,6 +64,32 @@ def force_safe_env(db_path: Path) -> None:
     os.environ["TAFO_E2E"] = "1"
 
 
+def register_e2e_reset(app, db_path: Path) -> None:
+    """POST /api/e2e/reset reloads the throwaway demo week.
+
+    The method is POST. GET is 405. Register this before a static UI mount:
+    a mount at / answers POST with 405 and Allow: GET, HEAD, which looks
+    like the route is missing.
+    """
+    from fastapi.responses import JSONResponse
+    from starlette.routing import Mount
+
+    def reset_fixture() -> JSONResponse:
+        faults = getattr(app.state, "demo_faults", None)
+        if faults is not None:
+            faults.clear()
+        reset_database(db_path)
+        return JSONResponse({"ok": True, "db": str(db_path)})
+
+    app.add_api_route("/api/e2e/reset", reset_fixture, methods=["POST"], tags=["e2e"])
+    routes = app.router.routes
+    mounts = [index for index, route in enumerate(routes) if isinstance(route, Mount)]
+    if not mounts:
+        return
+    added = routes.pop()
+    routes.insert(mounts[0], added)
+
+
 def main(argv: list[str] | None = None) -> int:
     del argv
     raw = os.environ.get("TAFO_DB_PATH", "").strip()
@@ -82,7 +108,6 @@ def main(argv: list[str] | None = None) -> int:
     force_safe_env(db_path)
 
     import uvicorn
-    from fastapi.responses import JSONResponse
 
     from tafo.main import app
 
@@ -94,13 +119,7 @@ def main(argv: list[str] | None = None) -> int:
         print("Refusing to serve outside demo loopback settings.", file=sys.stderr)
         return 2
 
-    @app.post("/api/e2e/reset")
-    def reset_fixture() -> JSONResponse:
-        faults = getattr(app.state, "demo_faults", None)
-        if faults is not None:
-            faults.clear()
-        reset_database(db_path)
-        return JSONResponse({"ok": True, "db": str(db_path)})
+    register_e2e_reset(app, db_path)
 
     print(f"TAFO e2e demo server db={db_path} port={settings.port}", flush=True)
     uvicorn.run(app, host=settings.host, port=settings.port, log_level="info")

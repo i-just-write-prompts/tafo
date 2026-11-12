@@ -79,6 +79,21 @@ export function quickToast(title: string, startHour: number): string {
   return `${title} → ${clockMinutes(startHour)}`;
 }
 
+/** A refused calendar write. No arrow: an arrow is the saved-move claim. */
+export function refusedMoveToast(title: string): string {
+  return `${title} didn't move.`;
+}
+
+/** An approved proposal whose calendar create did not land. No arrow. */
+export function unplacedToast(title: string): string {
+  return `${title} · not on calendar`;
+}
+
+/** Narrow plan banner. The name stays on the Review sheet's Changed tag. */
+export function compactConflict(count: number): string {
+  return `${count} changed`;
+}
+
 export function dayName(dayKey: string): string {
   return DAYS[PlanTime.weekdayIndex(dayKey)];
 }
@@ -125,19 +140,29 @@ export function dragReadout(title: string, day: string, start: number, end: numb
 }
 
 export function bannerText(moves: number, proposals: number, unsavedFits: boolean): string {
+  if (moves === 0 && proposals > 0) return `Agent suggests ${proposals}`;
   if (moves === 0) return "Drag blocks · nothing saves until Review";
   const base = `${plural(moves, "move")}${proposals ? ` · agent suggests ${proposals}` : ""}`;
   return unsavedFits ? `${base} · unsaved` : base;
 }
 
 export function approveLabel(moves: number, proposals: number): string {
+  if (moves === 0) return `Approve all · ${plural(proposals, "proposal")}`;
   if (proposals === 0) return `Approve all · ${plural(moves, "move")}`;
   return `Approve all · ${plural(moves, "move")} + ${plural(proposals, "proposal")}`;
 }
 
-export function approvedToast(moves: number, proposals: number): string {
-  if (proposals === 0) return `Approved ${plural(moves, "move")}`;
-  return `Approved ${plural(moves, "move")} + ${plural(proposals, "proposal")}`;
+export function approvedToast(moves: number, proposals: number, held: string[] = []): string {
+  const parts: string[] = [];
+  if (moves > 0) parts.push(plural(moves, "move"));
+  if (proposals > 0) parts.push(plural(proposals, "proposal"));
+  if (held.length > 0) {
+    const count = moves + proposals;
+    const saved = count > 0 ? `Approved ${count}` : "Approved";
+    return `${saved} · ${joinedNames(held)} changed`;
+  }
+  const saved = parts.length === 0 ? "Approved" : `Approved ${parts.join(" + ")}`;
+  return saved;
 }
 
 function joinedNames(names: string[]): string {
@@ -160,6 +185,11 @@ export function denyToast(title: string): string {
   return `Denied · ${title} → Unscheduled`;
 }
 export const REVERT_TOAST = "Reverted. Nothing changed.";
+
+export function revertToast(unsynced: string[]): string {
+  if (unsynced.length === 0) return REVERT_TOAST;
+  return `Reverted · ${joinedNames(unsynced)} not on calendar`;
+}
 export const SYNC_DEMO = "Demo · not synced";
 export const TIP_TEXT = "Moving several? Try Plan";
 export const PLAN_HINT = "Move several blocks, then approve or revert them together";

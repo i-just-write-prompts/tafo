@@ -47,5 +47,9 @@ describe("plan board selectors", () => {
     const rows = PlanBoard.sidebarTasks(tasks, [], proposals, "unscheduled", "");
     expect(rows.map((task) => task.id)).toEqual(["open"]);
     expect(PlanBoard.sidebarTasks(tasks, [], proposals, "all", "hel").map((task) => task.id)).toEqual(["held"]);
+    const approved = [proposal("placed", "2026-11-10T15:00:00Z")];
+    approved[0].status = "approved";
+    approved[0].payload.task_id = "held";
+    expect(PlanBoard.sidebarTasks(tasks, [], approved, "unscheduled", "").map((task) => task.id)).toEqual(["open"]);
   });
 });

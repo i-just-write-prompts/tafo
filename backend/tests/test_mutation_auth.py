@@ -25,8 +25,8 @@ BODIES = {
     ("POST", "/api/decisions/{proposal_id}/approve"): {"expected_version": 1, "confirmed": True},
     ("POST", "/api/decisions/{proposal_id}/edit"): {"expected_version": 1, "confirmed": True, "payload": {}},
     ("POST", "/api/decisions/{proposal_id}/reject"): {"expected_version": 1, "confirmed": True},
+    ("POST", "/api/decisions/{proposal_id}/undo"): {"expected_version": 1, "confirmed": True},
     ("POST", "/api/calendar/outbox/{outbox_id}/retry"): None,
-    ("POST", "/api/e2e/fail-writes"): {"event_keys": []},
     ("POST", "/api/admin/backup"): None,
     ("POST", "/api/admin/restore"): {"confirm": "REPLACE_LOCAL_DATA", "snapshot": {}},
 }
@@ -112,3 +112,38 @@ def test_every_mutation_rejects_an_agent_and_decisions_require_a_session(client)
     )
     assert denied.status_code == 403
     assert denied.json()["detail"]["code"] == "ui_session_required"
+
+
+def test_cookie_free_writes_reject_cross_site_and_non_json(client):
+    client.inject_ui_session = False
+    blocks = client.get("/api/calendar/blocks").json()
+    proposals = client.get("/api/hermes/proposals").json()
+    tasks = client.get("/api/tasks").json()
+    routes = [key for key in BODIES if not key[1].startswith("/api/decisions")]
+    routes.append(("POST", "/api/hermes/proposals"))
+    routes.extend(MANAGER)
+    assert ("POST", "/api/admin/restore") in routes
+    for method, path in routes:
+        url = _fill(path).replace("{rest}", "tasks").replace("{action}", "approve")
+        origin = client.request(
+            method,
+            url,
+            content=b"{}",
+            headers={"Origin": "https://evil.example", "Content-Type": "application/json"},
+        )
+        assert origin.status_code == 403, (method, path, origin.status_code, origin.text)
+        assert origin.json()["detail"]["code"] == "bad_origin"
+        cross = client.request(
+            method,
+            url,
+            content=b"{}",
+            headers={"Sec-Fetch-Site": "cross-site", "Content-Type": "application/json"},
+        )
+        assert cross.status_code == 403, (method, path, cross.status_code, cross.text)
+        assert cross.json()["detail"]["code"] == "cross_site"
+        bare = client.request(method, url, content=b"{}")
+        assert bare.status_code == 415, (method, path, bare.status_code, bare.text)
+        assert bare.json()["detail"]["code"] == "json_required"
+    assert client.get("/api/calendar/blocks").json() == blocks
+    assert client.get("/api/hermes/proposals").json() == proposals
+    assert client.get("/api/tasks").json() == tasks
