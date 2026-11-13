@@ -19,6 +19,20 @@ function pythonBin(): string {
   return "python3";
 }
 
+/** v4 slice-1 Playwright specs (exist in-repo; run with TAFO_V4_E2E=1). */
+const v4Slice1E2eGlobs = [
+  "**/autoscroll-dwell.spec.ts",
+  "**/cross-day-*.spec.ts",
+  "**/details-date-row.spec.ts",
+  "**/dst-fallback.spec.ts",
+  "**/gesture-arbitration.spec.ts",
+  "**/plan-cross-day.spec.ts",
+  "**/plan-swipe.spec.ts",
+  "**/tray-message-lift.spec.ts",
+  "**/week-24h.spec.ts",
+  "**/week-swipe.spec.ts",
+];
+
 const browserEnv = {
   ...process.env,
   TAFO_E2E_DIR: e2eDir,
@@ -40,6 +54,7 @@ const browserEnv = {
 
 export default defineConfig({
   testDir: "./e2e",
+  testIgnore: process.env.TAFO_V4_E2E ? [] : v4Slice1E2eGlobs,
   fullyParallel: false,
   workers: 1,
   forbidOnly: Boolean(process.env.CI),
