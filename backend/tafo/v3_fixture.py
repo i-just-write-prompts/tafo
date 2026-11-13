@@ -64,6 +64,7 @@ EVENTS = (
     ("s2", "Groceries", "home", 5, 15, 16, "approved"),
     ("u1", "Brunch", "personal", 6, 10, 11, "approved"),
     ("u2", "Meal prep", "home", 6, 16, 17, "approved"),
+    ("offsite", "Team offsite", "work", 1, 0, 24, "approved"),
 )
 
 UNSCHEDULED = (
@@ -143,6 +144,8 @@ class V3Week:
                         actor="human",
                     )
                     order += 10
+                    starts_at = _local(day, start)
+                    ends_at = _local(day + 1, 0) if event_id == "offsite" else _local(day, end)
                     if state == "proposed":
                         proposals.append(
                             {
@@ -154,8 +157,8 @@ class V3Week:
                                 "payload": {
                                     "task_id": task_id,
                                     "domain": domain,
-                                    "starts_at": _local(day, start),
-                                    "ends_at": _local(day, end),
+                                    "starts_at": starts_at,
+                                    "ends_at": ends_at,
                                 },
                             }
                         )
@@ -174,14 +177,35 @@ class V3Week:
                             task_id,
                             title,
                             "Time block created by TAFO.",
-                            _local(day, start),
-                            _local(day, end),
+                            starts_at,
+                            ends_at,
                             domain,
                             DEMO_HONEST_LABEL,
                             stamp,
                             stamp,
                         ),
                     )
+                stamp = utc_now_iso()
+                conn.execute(
+                    """
+                    INSERT INTO calendar_blocks (
+                      id, task_id, origin_proposal_id, title, description, starts_at, ends_at, domain,
+                      invite_work_email, fixed, status, sync_state, written_mode, honest_label,
+                      google_event_id, version, created_at, updated_at
+                    ) VALUES (?, NULL, NULL, ?, ?, ?, ?, ?, 0, 0, 'scheduled', 'simulated', 'demo', ?, NULL, 1, ?, ?)
+                    """,
+                    (
+                        "blk_v3_conf",
+                        "Conference",
+                        "Multi-day hold.",
+                        _local(0, 0),
+                        _local(3, 0),
+                        "work",
+                        DEMO_HONEST_LABEL,
+                        stamp,
+                        stamp,
+                    ),
+                )
                 for event_id, title, domain in UNSCHEDULED:
                     create_task(
                         conn,

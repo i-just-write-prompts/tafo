@@ -4,7 +4,7 @@
 import { expect, test, type Locator, type Page } from "@playwright/test";
 
 import { armWriteFailure, checkSaveClaim, readCalendar, type CalendarBlockRow, type ProposalRow } from "./helpers/saveClaim";
-import { block, center, dragHold, openDay, press, reseed } from "./support";
+import { block, center, dragHold, HOUR_DRAG_PX, openDay, press, reseed } from "./support";
 
 test.beforeEach(async ({ page, request }) => {
   await reseed(request);
@@ -97,7 +97,7 @@ test("PR1 a refused quick drag stays visible with Retry", async ({ page }, testI
   const budget = proposalNamed(before, "Budget sheet");
   const taskId = budget.payload.task_id || "";
   await armWriteFailure(page, [], 1);
-  await dragTitle(page, testInfo.project.name, "Budget sheet", 60);
+  await dragTitle(page, testInfo.project.name, "Budget sheet", HOUR_DRAG_PX);
   await page.locator("[data-testid=plan-toast]").waitFor();
   const edited = await readCalendar(page);
   const row = edited.proposals.find((item) => item.id === budget.id);
@@ -169,7 +169,7 @@ test("Approve all a refused proposal shows Retry and stays visible", async ({ pa
   const budget = proposalNamed(before, "Budget sheet");
   const taskId = budget.payload.task_id || "";
   await press(page.getByRole("button", { name: "Plan mode" }), testInfo.project.name);
-  await dragTitle(page, testInfo.project.name, "Budget sheet", 60);
+  await dragTitle(page, testInfo.project.name, "Budget sheet", HOUR_DRAG_PX);
   const draft = JSON.parse(await page.evaluate(() => localStorage.getItem("tafo.v3.plan.v2") || "null"));
   const move = draft.moves.find((item: { title: string }) => item.title === "Budget sheet");
   await armWriteFailure(page, [], 1);
@@ -205,7 +205,7 @@ test("plan commit a refused block move stays on the calendar", async ({ page }, 
   const vendor = before.blocks.find((item) => item.title === "Call vendor" && item.status === "scheduled");
   if (!vendor) throw new Error("vendor missing");
   await press(page.getByRole("button", { name: "Plan mode" }), testInfo.project.name);
-  await dragTitle(page, testInfo.project.name, "Call vendor", 60);
+  await dragTitle(page, testInfo.project.name, "Call vendor", HOUR_DRAG_PX);
   const draft = JSON.parse(await page.evaluate(() => localStorage.getItem("tafo.v3.plan.v2") || "null"));
   const move = draft.moves.find((item: { id: string }) => item.id === vendor.id);
   await armWriteFailure(page, [vendor.id]);
@@ -235,7 +235,7 @@ test("after a failed approve, Revert all keeps Not on calendar with Retry", asyn
   const budget = proposalNamed(before, "Budget sheet");
   const taskId = budget.payload.task_id || "";
   await press(page.getByRole("button", { name: "Plan mode" }), testInfo.project.name);
-  await dragTitle(page, testInfo.project.name, "Budget sheet", 60);
+  await dragTitle(page, testInfo.project.name, "Budget sheet", HOUR_DRAG_PX);
   const draft = JSON.parse(await page.evaluate(() => localStorage.getItem("tafo.v3.plan.v2") || "null"));
   const move = draft.moves.find((item: { title: string }) => item.title === "Budget sheet");
   await armWriteFailure(page, [], 1);
@@ -278,7 +278,7 @@ test("after a failed approve, Revert all keeps Not on calendar with Retry", asyn
 
 test("Not on calendar Retry is a full-width secondary button", async ({ page }, testInfo) => {
   await armWriteFailure(page, [], 1);
-  await dragTitle(page, testInfo.project.name, "Budget sheet", 60);
+  await dragTitle(page, testInfo.project.name, "Budget sheet", HOUR_DRAG_PX);
   await expect(page.locator("[data-testid=plan-toast]")).toHaveCount(0, { timeout: 6000 });
   const marker = page.getByRole("button", { name: /Budget sheet/ });
   await expect(marker).toHaveAttribute("aria-label", /Not on calendar/);
@@ -301,7 +301,7 @@ test("Not on calendar Retry is a full-width secondary button", async ({ page }, 
 test("an unplaced marker keeps its time and is not listed twice", async ({ page }, testInfo) => {
   await expect(page.getByTestId("unscheduled")).toHaveText(/Unscheduled\s*4/);
   await armWriteFailure(page, [], 1);
-  await dragTitle(page, testInfo.project.name, "Budget sheet", 60);
+  await dragTitle(page, testInfo.project.name, "Budget sheet", HOUR_DRAG_PX);
   await expect(page.locator("[data-testid=plan-toast]")).toHaveCount(0, { timeout: 6000 });
   const marker = page.getByRole("button", { name: /Budget sheet/ });
   await expect(marker).toContainText("3:00 PM · Not on calendar");
@@ -325,7 +325,7 @@ test("only the event name ellipsizes on a not-on-calendar toast", async ({ page 
   await page.reload();
   await expect(page.getByRole("heading", { name: "Tue, Nov 10" })).toBeVisible();
   await armWriteFailure(page, [], 1);
-  await dragTitle(page, testInfo.project.name, "Quarterly budget", 60);
+  await dragTitle(page, testInfo.project.name, "Quarterly budget", HOUR_DRAG_PX);
   const parts = await statusFits(page, /not on calendar/);
   expect(parts.nameClipped, "the long name is the part that ellipsizes").toBe(true);
 });
@@ -334,7 +334,7 @@ test("a Proposed quick drag toast has no Undo", async ({ page }, testInfo) => {
   const before = await readCalendar(page);
   const budget = proposalNamed(before, "Budget sheet");
   const taskId = budget.payload.task_id || "";
-  await dragTitle(page, testInfo.project.name, "Budget sheet", 60);
+  await dragTitle(page, testInfo.project.name, "Budget sheet", HOUR_DRAG_PX);
   const toast = page.getByTestId("plan-toast");
   await expect(toast).toBeVisible();
   expect(await toast.getByRole("button", { name: "Undo" }).count()).toBe(0);
@@ -381,7 +381,7 @@ test("an Approve all toast has no Undo", async ({ page }, testInfo) => {
   const budget = proposalNamed(before, "Budget sheet");
   const closet = proposalNamed(before, "Fix closet door");
   await press(page.getByRole("button", { name: "Plan mode" }), testInfo.project.name);
-  await dragTitle(page, testInfo.project.name, "Call vendor", 60);
+  await dragTitle(page, testInfo.project.name, "Call vendor", HOUR_DRAG_PX);
   await press(page.getByRole("button", { name: "Review", exact: true }), testInfo.project.name);
   await press(page.getByTestId("approve-all"), testInfo.project.name);
   const toast = page.getByTestId("plan-toast");
@@ -404,7 +404,7 @@ test("revert toast fits on one line with the status visible", async ({ page }, t
   const before = await readCalendar(page);
   const budget = proposalNamed(before, "Budget sheet");
   await press(page.getByRole("button", { name: "Plan mode" }), testInfo.project.name);
-  await dragTitle(page, testInfo.project.name, "Budget sheet", 60);
+  await dragTitle(page, testInfo.project.name, "Budget sheet", HOUR_DRAG_PX);
   await armWriteFailure(page, [], 1);
   await press(page.getByRole("button", { name: "Review", exact: true }), testInfo.project.name);
   await press(page.getByTestId("approve-all"), testInfo.project.name);
@@ -430,7 +430,7 @@ test("approve-after-conflict toast fits on one line with changed visible", async
   const closet = proposalNamed(before, "Fix closet door");
   if (!spec) throw new Error("spec missing");
   await press(page.getByRole("button", { name: "Plan mode" }), testInfo.project.name);
-  await dragTitle(page, testInfo.project.name, "Spec review", 60);
+  await dragTitle(page, testInfo.project.name, "Spec review", HOUR_DRAG_PX);
   const shifted = new Date(Date.parse(spec.starts_at) + 15 * 60 * 1000).toISOString().replace(/\.\d{3}Z$/, "Z");
   const shiftedEnd = new Date(Date.parse(spec.ends_at) + 15 * 60 * 1000).toISOString().replace(/\.\d{3}Z$/, "Z");
   const changed = await page.evaluate(async (body) => {
@@ -488,7 +488,7 @@ test("compact conflict line fits and Review carries the name", async ({ page }, 
   const spec = before.blocks.find((item) => item.title === "Spec review");
   if (!spec) throw new Error("spec missing");
   await press(page.getByRole("button", { name: "Plan mode" }), testInfo.project.name);
-  await dragTitle(page, testInfo.project.name, "Spec review", 60);
+  await dragTitle(page, testInfo.project.name, "Spec review", HOUR_DRAG_PX);
   const shifted = new Date(Date.parse(spec.starts_at) + 15 * 60 * 1000).toISOString().replace(/\.\d{3}Z$/, "Z");
   const shiftedEnd = new Date(Date.parse(spec.ends_at) + 15 * 60 * 1000).toISOString().replace(/\.\d{3}Z$/, "Z");
   const changed = await page.evaluate(async (body) => {
@@ -593,7 +593,7 @@ async function doubleTapApprove(page: Page, project: string, gap: number) {
     if (request.method() === "POST" && request.url().includes("/api/decisions/plan/commit")) commits += 1;
   });
   await press(page.getByRole("button", { name: "Plan mode" }), project);
-  await dragTitle(page, project, "Call vendor", 60);
+  await dragTitle(page, project, "Call vendor", HOUR_DRAG_PX);
   await press(page.getByRole("button", { name: "Review", exact: true }), project);
   // No block under Approve all in the phone layout, per Verifier 350db59 note 1.
   const seedGhost = project !== "phone";
@@ -667,7 +667,7 @@ test("toast Retry of a refused approval clears the draft move", async ({ page },
   const before = await readCalendar(page);
   const budget = proposalNamed(before, "Budget sheet");
   await press(page.getByRole("button", { name: "Plan mode" }), testInfo.project.name);
-  await dragTitle(page, testInfo.project.name, "Budget sheet", 60);
+  await dragTitle(page, testInfo.project.name, "Budget sheet", HOUR_DRAG_PX);
   const draft = JSON.parse(await page.evaluate(() => localStorage.getItem("tafo.v3.plan.v2") || "null"));
   const move = draft.moves.find((item: { title: string }) => item.title === "Budget sheet");
   await armWriteFailure(page, [], 1);

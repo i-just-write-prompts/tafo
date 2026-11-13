@@ -28,9 +28,9 @@ describe("day geometry", () => {
     const spec = boxes.find((box) => box.id === "spec");
     expect(standup).toBeTruthy();
     expect(spec).toBeTruthy();
-    expect(drawnHeight(0.5)).toBe(28);
-    expect(standup?.h).toBe(28);
-    expect(standup?.slotH).toBe(30);
+    expect(drawnHeight(0.5)).toBe(34);
+    expect(standup?.h).toBe(34);
+    expect(standup?.slotH).toBe(36);
     expect((spec?.slotY ?? 0) - ((standup?.slotY ?? 0) + (standup?.slotH ?? 0))).toBe(0);
     expect((spec?.y ?? 0) - ((standup?.y ?? 0) + (standup?.h ?? 0))).toBe(2);
   });

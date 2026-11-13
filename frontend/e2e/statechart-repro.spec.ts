@@ -3,7 +3,7 @@
 import { expect, test, type Page } from "@playwright/test";
 
 import { armWriteFailure, checkSaveClaim, readCalendar } from "./helpers/saveClaim";
-import { block, center, dragHold, openDay, press, reseed } from "./support";
+import { block, center, dragHold, HOUR_DRAG_PX, openDay, press, reseed } from "./support";
 
 test.beforeEach(async ({ page, request }) => {
   await reseed(request);
@@ -26,7 +26,7 @@ test("SY1 a quick drag whose Google write fails never says saved and can be retr
   const before = await blockRow(page, "Lunch w/ Sam");
   if (!before) throw new Error("fixture missing");
   await armWriteFailure(page, [before.id]);
-  await drag(page, "Lunch w/ Sam", 60);
+  await drag(page, "Lunch w/ Sam", HOUR_DRAG_PX);
   const toast = page.getByTestId("plan-toast");
   await expect(toast).toBeVisible();
   const text = await checkSaveClaim(page, {
@@ -49,14 +49,14 @@ test("PM2 a saved quick drag keeps Undo and its new spot when the re-read fails"
     await route.fulfill({ response });
   });
   await page.route("**/api/calendar/blocks", (route) => (failReads ? route.abort() : route.continue()));
-  await drag(page, "Lunch w/ Sam", 60);
+  await drag(page, "Lunch w/ Sam", HOUR_DRAG_PX);
   await page.waitForTimeout(1500);
   const after = await blockRow(page, "Lunch w/ Sam");
   const undoCount = await page.getByRole("button", { name: "Undo" }).count();
   const label = await block(page, "Lunch w/ Sam").getAttribute("aria-label");
   await page.waitForTimeout(3500);
   await press(page.getByRole("button", { name: "Plan mode" }), testInfo.project.name);
-  await drag(page, "Lunch w/ Sam", 120);
+  await drag(page, "Lunch w/ Sam", HOUR_DRAG_PX * 2);
   await press(page.getByRole("button", { name: "Revert" }), testInfo.project.name);
   await press(page.getByRole("button", { name: "Revert all" }), testInfo.project.name);
   expect(after?.starts_at, "the save reached the server").not.toBe(before.starts_at);
@@ -72,8 +72,8 @@ test("PM1 a second quick drag while the first one saves is not thrown away", asy
     await new Promise((resolve) => setTimeout(resolve, 2500));
     await route.continue();
   });
-  await drag(page, "Lunch w/ Sam", 60);
-  await drag(page, "Call vendor", 120);
+  await drag(page, "Lunch w/ Sam", HOUR_DRAG_PX);
+  await drag(page, "Call vendor", HOUR_DRAG_PX * 2);
   await page.waitForTimeout(8000);
   const lunch = await blockRow(page, "Lunch w/ Sam");
   const vendor = await blockRow(page, "Call vendor");
@@ -87,7 +87,7 @@ test("PR1 moving a Proposed block outside Plan mode makes it Mike's decision", a
   if (!budgetProposal) throw new Error("fixture missing");
   const budget = block(page, "Budget sheet");
   await expect(budget).toHaveAttribute("aria-label", /Proposed/);
-  await drag(page, "Budget sheet", 60);
+  await drag(page, "Budget sheet", HOUR_DRAG_PX);
   const toast = page.getByTestId("plan-toast");
   await expect(toast).toBeVisible();
   await checkSaveClaim(page, {

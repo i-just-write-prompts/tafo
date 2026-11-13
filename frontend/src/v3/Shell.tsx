@@ -4,7 +4,22 @@ import { ApiError, reportFailure } from "../api";
 import { calendar, type PlanApprovalInput, type PlanMoveInput } from "../calendar/client";
 import { PlanMachine } from "../plan/planMachine";
 import { PlanBoard } from "../plan/selectors";
-import { PlanTime } from "../plan/time";
+import { PlanTime, PX_PER_MINUTE } from "../plan/time";
+import { MonthGridSheet } from "../v4/MonthGridSheet";
+import {
+  crossDayHoverCell,
+  crossDayIdle,
+  crossDayInterrupt,
+  crossDayLift,
+  crossDayRelease,
+  crossDayStripEnter,
+  crossDayStripLeave,
+  crossDaySurfaceAt,
+  crossDayTick,
+  dwellProgress,
+  type CrossDayState,
+} from "../v4/crossDay";
+import { coversDayKey, isAllDayEvent, isMultiDayEvent, multiDayLabel } from "../v4/eventShape";
 import { TAFO_REV } from "../rev";
 import type { CalendarBlock, Meta, OutboxOperation, Proposal, Task } from "../types";
 import {
@@ -19,7 +34,6 @@ import {
   dayTaps,
   dayY,
   moveByPointer,
-  nearMark,
   paintedWeekSpan,
   weekBoxes,
   weekColumnWidth,
@@ -59,7 +73,25 @@ import { ALL_SHOWN, buildEvents, showSummary, visibleEvents, withMove, type CalE
 import { approveDisabled, conflictingMoveIds, enterPlan, exitPlan, includedIds, loadPlan, pendingProposalIds, proposalsOnDays, retainMoves, sameInstant, savePlan, stageMove, toggleSkip, type PlanSession, type StagedMove } from "./session";
 import { wrapWeekTitle } from "./titles";
 import { showUndo, type UndoToast } from "./undo";
+import {
+  CrossDayBanner,
+  DwellRing,
+  HourRows,
+  NextDayRow,
+  NowChip,
+  ReentryHint,
+  crossDayMoveLabel,
+  dayRowsFor,
+  stripCellId,
+  useGridPager,
+  useScrollHour,
+  weekGridHeightPx,
+  weekHourCount,
+  weekRowsFor,
+} from "./calendarV4";
 import "./v3.css";
+
+type CalendarView = "day" | "week" | "month";
 
 const TIP_KEY = "tafo.planTipShown";
 
@@ -75,7 +107,9 @@ type Overlay =
   | { kind: "event"; id: string }
   | { kind: "review" }
   | { kind: "revert" }
-  | { kind: "fixed"; id: string; start: string; end: string };
+  | { kind: "fixed"; id: string; start: string; end: string }
+  | { kind: "jump"; moveEventId?: string }
+  | { kind: "month" };
 
 interface DragOrigin {
   id: string;
@@ -150,8 +184,9 @@ const APPROVE_CLICK_SHIELD_MS = 700;
 
 export function CalendarShell(props: Props) {
   const timeZone = props.meta?.display_timezone || "America/Indianapolis";
-  const [mode, setMode] = useState<"day" | "week">("day");
+  const [mode, setMode] = useState<CalendarView>("day");
   const [anchor, setAnchor] = useState(() => PlanTime.dayKey(new Date(), timeZone));
+  const [monthAnchor, setMonthAnchor] = useState(() => PlanTime.dayKey(new Date(), timeZone));
   const [plan, setPlanState] = useState<PlanSession>(() => loadPlan());
   const [trayOpen, setTrayOpen] = useState(false);
   function setPlan(next: PlanSession | ((current: PlanSession) => PlanSession)) {
@@ -207,6 +242,22 @@ export function CalendarShell(props: Props) {
     setBusy(value);
   }
   const gridRef = useRef<HTMLDivElement>(null);
+  const [crossDay, setCrossDay] = useState<CrossDayState>(crossDayIdle);
+  const crossDayRef = useRef(crossDay);
+  crossDayRef.current = crossDay;
+  const [traySaveMessage, setTraySaveMessage] = useState<string | null>(null);
+  const [crossDayTrayPending, setCrossDayTrayPending] = useState(false);
+  const [trayHoldUntilAnchor, setTrayHoldUntilAnchor] = useState<string | null>(null);
+  const [trayTargetDay, setTrayTargetDay] = useState<string | null>(null);
+  const [trayMovedId, setTrayMovedId] = useState<string | null>(null);
+  const [traySaveUndo, setTraySaveUndo] = useState<(() => Promise<void>) | null>(null);
+  const [crossHighlightId, setCrossHighlightId] = useState<string | null>(null);
+  const reducedMotion = typeof window !== "undefined" && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+  const autoScrollRef = useRef<{ zone: "top" | "bottom" | null; since: number }>({ zone: null, since: 0 });
+  const stripDwellTimerRef = useRef(0);
+  const [weekStripOffset, setWeekStripOffset] = useState(0);
+  const [nowOffscreen, setNowOffscreen] = useState(false);
+  const scrollHour = useScrollHour(gridRef);
   const originRef = useRef<DragOrigin | null>(null);
   const gestureRef = useRef<Gesture>({ phase: "idle" });
   const settleFrom = useRef<{ id: string; left: number; top: number; width: number; height: number } | null>(null);
@@ -223,11 +274,41 @@ export function CalendarShell(props: Props) {
     () => buildEvents(props.tasks, props.blocks, props.proposals, timeZone, props.outbox),
     [props.tasks, props.blocks, props.proposals, props.outbox, timeZone],
   );
-  const monday = PlanTime.mondayKey(anchor);
+  const monday = PlanTime.addDaysToKey(PlanTime.mondayKey(anchor), weekStripOffset * 7);
   const weekKeys = PlanTime.visibleDayKeys(monday, "week");
+  const gridDayKey = crossDay.phase === "carrying" && crossDay.peeked ? crossDay.viewDayKey : anchor;
+  const pager = useGridPager({
+    width,
+    enabled: gesture.phase !== "lifted" && mode !== "month",
+    onPrev: () => {
+      if (mode === "week") setWeekStripOffset((offset) => offset - 1);
+      else setAnchor(PlanTime.addDaysToKey(anchor, -1));
+    },
+    onNext: () => {
+      if (mode === "week") setWeekStripOffset((offset) => offset + 1);
+      else setAnchor(PlanTime.addDaysToKey(anchor, 1));
+    },
+  });
   const todayKey = PlanTime.dayKey(now, timeZone);
   const nowParts = PlanTime.parts(now, timeZone);
   const nowHour = nowParts.hour + nowParts.minute / 60;
+
+  useEffect(() => {
+    const grid = gridRef.current;
+    if (!grid || anchor !== todayKey || mode !== "day") {
+      setNowOffscreen(false);
+      return undefined;
+    }
+    const read = () => {
+      const y = nowHour * 60 * PX_PER_MINUTE;
+      const viewTop = grid.scrollTop;
+      const viewBottom = viewTop + grid.clientHeight;
+      setNowOffscreen(y < viewTop - 8 || y > viewBottom - 8);
+    };
+    read();
+    grid.addEventListener("scroll", read, { passive: true });
+    return () => grid.removeEventListener("scroll", read);
+  }, [anchor, todayKey, nowHour, mode]);
 
   const baseEvents = useMemo(() => {
     return serverEvents.map((event) => {
@@ -244,7 +325,18 @@ export function CalendarShell(props: Props) {
   }, [serverEvents, plan, overrides, timeZone]);
 
   const shown = visibleEvents(baseEvents, filters, overlay?.kind === "search" ? "" : query);
-  const dragPreview = previewFrom(gesture, originRef.current, mode, monday, gridRef.current, width, gesture.phase === "lifted" ? snapRef.current : null);
+  const dragPreview = previewFrom(
+    gesture,
+    originRef.current,
+    mode === "month" ? "day" : mode,
+    monday,
+    gridRef.current,
+    width,
+    gesture.phase === "lifted" ? snapRef.current : null,
+    gridDayKey,
+    timeZone,
+    crossDay.phase === "carrying" && crossDay.peeked,
+  );
   if (gesture.phase === "lifted" && dragPreview) snapRef.current = dragPreview.startHour;
   if (gesture.phase === "idle") snapRef.current = null;
   const events = shown.map((event) => {
@@ -254,10 +346,20 @@ export function CalendarShell(props: Props) {
     return start && end ? withMove(event, start, end, timeZone) : event;
   });
 
-  const dayEvents = shown.filter((event) => event.dayKey === anchor);
+  const dayEvents = shown.filter((event) => {
+    if (event.dayKey === gridDayKey) return true;
+    if (crossDay.phase === "carrying" && event.id === crossDay.eventId) return true;
+    if ((isMultiDayEvent(event, timeZone) || isAllDayEvent(event, timeZone)) && coversDayKey(event, gridDayKey, timeZone)) return true;
+    return false;
+  });
+  const allDayEvents = dayEvents.filter((event) => isAllDayEvent(event, timeZone));
+  const multiDayEvents = dayEvents.filter((event) => isMultiDayEvent(event, timeZone));
+  const timedDayEvents = dayEvents.filter((event) => !isAllDayEvent(event, timeZone) && !isMultiDayEvent(event, timeZone));
+  const stripSelection = crossDay.phase === "carrying" && crossDay.peeked ? crossDay.viewDayKey : anchor;
+  const weekHourMax = weekHourCount(weekKeys, timeZone);
   const weekEvents = shown.filter((event) => weekKeys.includes(event.dayKey));
   const rangeIds = pendingProposalIds(
-    proposalsOnDays(baseEvents, mode === "day" ? [anchor] : weekKeys).map((event) => event.id),
+    proposalsOnDays(baseEvents, mode === "day" || mode === "month" ? [anchor] : weekKeys).map((event) => event.id),
     plan.moves,
   );
   const included = includedIds(rangeIds, plan.skipped);
@@ -279,6 +381,88 @@ export function CalendarShell(props: Props) {
     const tick = window.setInterval(() => setNow(new Date()), 30_000);
     return () => window.clearInterval(tick);
   }, []);
+
+  useLayoutEffect(() => {
+    const grid = gridRef.current;
+    if (!grid || props.loading || mode === "month") return;
+    const initKey = mode === "week" ? "week" : `day-${gridDayKey}`;
+    if (grid.dataset.scrollInitKey === initKey) return;
+    if (mode === "week") {
+      grid.scrollTop = 0;
+    } else {
+      const keys = [gridDayKey];
+      grid.scrollTop = PlanTime.initialScrollTop(keys, now, timeZone, grid.clientHeight);
+    }
+    grid.dataset.scrollInitKey = initKey;
+  }, [mode, gridDayKey, weekKeys, now, timeZone, props.loading]);
+
+  useEffect(() => {
+    if (gesture.phase === "lifted" && mode === "day" && originRef.current) {
+      const grid = gridRef.current;
+      setCrossDay((current) => {
+        if (current.phase === "carrying") return current;
+        return crossDayLift(originRef.current!.id, originRef.current!.dayKey, (grid?.scrollTop ?? 0) / PX_PER_MINUTE);
+      });
+    } else if (gesture.phase !== "lifted") {
+      setCrossDay((current) => (current.phase === "carrying" ? current : crossDayIdle()));
+    }
+  }, [gesture.phase, mode, gesture.phase === "lifted" && gesture.phase === "lifted" ? gesture.eventId : ""]);
+
+  useEffect(() => {
+    if (crossDay.phase !== "carrying" || !crossDay.hoverDayKey) return undefined;
+    const timer = window.setInterval(() => {
+      setCrossDay((state) => crossDayTick(state, 20));
+    }, 20);
+    return () => window.clearInterval(timer);
+  }, [crossDay.phase, crossDay.onStrip, crossDay.hoverDayKey]);
+
+  useEffect(() => {
+    if (crossDay.phase !== "carrying" || !crossDay.peeked) return undefined;
+    const onMove = (clientX: number, clientY: number, pointerId: number, pointerType: string) => {
+      if (gestureRef.current.phase !== "idle") return;
+      if (crossDaySurfaceAt(clientX, clientY) !== "grid") return;
+      resumeCrossDayPointerDrag({ pointerId, clientX, clientY, pointerType });
+    };
+    const onPointerMove = (native: PointerEvent) => {
+      onMove(native.clientX, native.clientY, native.pointerId, native.pointerType);
+    };
+    const onTouchMove = (native: TouchEvent) => {
+      const touch = native.touches[0] ?? native.changedTouches[0];
+      if (!touch) return;
+      onMove(touch.clientX, touch.clientY, touch.identifier, "touch");
+    };
+    window.addEventListener("pointermove", onPointerMove, true);
+    window.addEventListener("touchmove", onTouchMove, { capture: true, passive: true });
+    return () => {
+      window.removeEventListener("pointermove", onPointerMove, true);
+      window.removeEventListener("touchmove", onTouchMove, true);
+    };
+  }, [crossDay.phase, crossDay.peeked, crossDay.eventId]);
+
+  useEffect(() => {
+    if (crossDay.phase === "carrying" && crossDay.peeked) {
+      setTrayHoldUntilAnchor(crossDay.originDayKey);
+    } else if (crossDay.phase === "idle" && !crossDayTrayPending) {
+      setTrayHoldUntilAnchor(null);
+    }
+  }, [crossDay.phase, crossDay.peeked, crossDay.originDayKey, crossDayTrayPending]);
+
+  useEffect(() => {
+    const grid = gridRef.current;
+    if (!grid || mode !== "day" || gridDayKey !== todayKey) {
+      setNowOffscreen(false);
+      return undefined;
+    }
+    const check = () => {
+      const nowY = PlanTime.yPx(nowParts.hour * 60 + nowParts.minute);
+      const top = grid.scrollTop;
+      const bottom = top + grid.clientHeight;
+      setNowOffscreen(nowY < top - 8 || nowY > bottom + 8);
+    };
+    check();
+    grid.addEventListener("scroll", check, { passive: true });
+    return () => grid.removeEventListener("scroll", check);
+  }, [mode, gridDayKey, todayKey, nowParts.hour, nowParts.minute]);
 
   useEffect(() => {
     setOverrides((current) => {
@@ -490,14 +674,66 @@ export function CalendarShell(props: Props) {
     }
   }
 
-  async function saveQuick(event: CalEvent, startIso: string, endIso: string, acknowledgeFixed = false) {
+  function restoreCrossDayView(originDayKey: string, scrollMinutes: number) {
+    setAnchor(originDayKey);
+    const grid = gridRef.current;
+    if (grid) grid.scrollTop = scrollMinutes * PX_PER_MINUTE;
+  }
+
+  function stopStripDwell() {
+    if (stripDwellTimerRef.current) window.clearInterval(stripDwellTimerRef.current);
+    stripDwellTimerRef.current = 0;
+  }
+
+  function beginStripDwell(dayKey: string) {
+    if (crossDayRef.current.phase !== "carrying") return;
+    flushSync(() => {
+      setCrossDay((state) => crossDayHoverCell(state.onStrip ? state : crossDayStripEnter(state), dayKey));
+    });
+    stopStripDwell();
+    stripDwellTimerRef.current = window.setInterval(() => {
+      setCrossDay((state) => crossDayTick(state, 20));
+    }, 20);
+  }
+
+  function stripDwellTargetFromPoint(clientX: number, clientY: number): string | null {
+    const el = document.elementFromPoint(clientX, clientY);
+  if (!(el instanceof Element)) return null;
+    const cell = el.closest("[data-strip-key]");
+    if (!(cell instanceof HTMLElement)) return null;
+    return cell.getAttribute("data-strip-key");
+  }
+
+  function resumeCrossDayPointerDrag(pointer: { pointerId: number; clientX: number; clientY: number; pointerType: string }): boolean {
+    const state = crossDayRef.current;
+    if (state.phase !== "carrying" || !state.peeked || gestureRef.current.phase !== "idle") return false;
+    const event =
+      baseEvents.find((item) => item.id === state.eventId)
+      ?? serverEvents.find((item) => item.id === state.eventId);
+    if (!event) return false;
+    startGesture(event, pointer);
+    const current = gestureRef.current as Gesture;
+    if (current.phase !== "pending") return false;
+    const lifted = { ...current, phase: "lifted" as const, point: { x: pointer.clientX, y: pointer.clientY } };
+    gestureRef.current = lifted;
+    flushSync(() => setGesture(lifted));
+    return true;
+  }
+
+  async function saveQuick(
+    event: CalEvent,
+    startIso: string,
+    endIso: string,
+    acknowledgeFixed = false,
+    opts?: { deferTray?: boolean },
+  ): Promise<{ line: string; targetDay: string; undo: (() => Promise<void>) | null } | null> {
     if (busyRef.current) {
       // Keep a second quick drag. The Approve-all click shield is a separate guard and stays.
       if (quickInFlight.current) {
         pendingQuick.current = { event, start: startIso, end: endIso, acknowledgeFixed };
         setOverrides((current) => ({ ...current, [event.id]: { start: startIso, end: endIso } }));
       }
-      return;
+      return null;
     }
     quickInFlight.current = true;
     const original = { start: event.start, end: event.end };
@@ -506,7 +742,7 @@ export function CalendarShell(props: Props) {
     try {
       if (event.kind === "proposal") {
         const proposal = propsRef.current.proposals.find((item) => item.id === event.id);
-        if (!proposal) return;
+        if (!proposal) return null;
         const saved = await calendar.move({
           kind: "proposal",
           title: event.title,
@@ -533,13 +769,26 @@ export function CalendarShell(props: Props) {
             undefined,
             outboxId ? () => retryRefused(outboxId, event.title, startIso, endIso, missed, event.id) : undefined,
           );
-          return;
+          return null;
         }
         const hour = withMove(event, startIso, endIso, timeZone).startHour;
-        pushToast(quickToast(event.title, hour));
+        const moved = withMove(event, startIso, endIso, timeZone);
+        const trayLine = moved.dayKey !== event.dayKey
+          ? crossDayMoveLabel(event.title, moved.dayKey, hour)
+          : quickToast(event.title, hour);
+        if (moved.dayKey !== event.dayKey && opts?.deferTray) {
+          return { line: trayLine, targetDay: moved.dayKey, undo: null };
+        }
+        setTrayHoldUntilAnchor(null);
+        setTraySaveMessage(trayLine);
+        if (moved.dayKey !== event.dayKey) {
+          setTrayTargetDay(moved.dayKey);
+          setTrayMovedId(event.id);
+        }
+        pushToast(trayLine);
       } else {
         const block = propsRef.current.blocks.find((item) => item.id === event.id);
-        if (!block) return;
+        if (!block) return null;
         const saved = await calendar.move({
           kind: "block",
           title: event.title,
@@ -562,12 +811,15 @@ export function CalendarShell(props: Props) {
             undefined,
             outboxId ? () => retryRefused(outboxId, title, startIso, endIso, refusedMoveToast(title), event.id) : undefined,
           );
-          return;
+          return null;
         }
         const hour = withMove(event, startIso, endIso, timeZone).startHour;
-        const message = quickToast(event.title, hour);
+        const moved = withMove(event, startIso, endIso, timeZone);
+        const message = moved.dayKey !== event.dayKey
+          ? crossDayMoveLabel(event.title, moved.dayKey, hour)
+          : quickToast(event.title, hour);
         const nextBlock = saved.block;
-        pushToast(message, nextBlock ? async () => {
+        const undoFn = nextBlock ? async () => {
           await calendar.undo({
             kind: "block",
             title: event.title,
@@ -583,22 +835,35 @@ export function CalendarShell(props: Props) {
             return copy;
           });
           await propsRef.current.onRefresh();
-        } : undefined);
+        } : undefined;
+        if (moved.dayKey !== event.dayKey && opts?.deferTray) {
+          return { line: message, targetDay: moved.dayKey, undo: undoFn ?? null };
+        }
+        setTrayHoldUntilAnchor(null);
+        setTraySaveMessage(message);
+        if (moved.dayKey !== event.dayKey) {
+          setTrayTargetDay(moved.dayKey);
+          setTrayMovedId(event.id);
+        }
+        if (undoFn) setTraySaveUndo(() => undoFn);
+        pushToast(message, undoFn);
         rememberTip(message);
       }
       glowIds([event.id]);
       try {
         await propsRef.current.onRefresh();
       } catch {
-        return;
+        return null;
       }
       setOverrides((current) => {
         const copy = { ...current };
         delete copy[event.id];
         return copy;
       });
+      return null;
     } catch (error) {
       await fail(error);
+      return null;
     } finally {
       quickInFlight.current = false;
       const next = pendingQuick.current;
@@ -643,11 +908,85 @@ export function CalendarShell(props: Props) {
     setOverlay({ kind: "event", id: event.id });
   }
 
-  function finishGesture(released: Gesture) {
+  function finishGesture(released: Gesture, surface: "grid" | "strip" | "tray" | "message" = "grid") {
     if (released.phase === "idle") return;
+    if (crossDayTrayPending) return;
     const event = baseEvents.find((item) => item.id === released.eventId) ?? serverEvents.find((item) => item.id === released.eventId);
     if (!event) return;
-    const preview = previewFrom(released, originRef.current, mode, monday, gridRef.current, width, snapRef.current);
+    const vm = mode === "month" ? "day" : mode;
+    let preview = previewFrom(
+      released,
+      originRef.current,
+      vm,
+      monday,
+      gridRef.current,
+      width,
+      snapRef.current,
+      gridDayKey,
+      timeZone,
+      crossDayRef.current.peeked,
+    );
+  const carrying = crossDayRef.current;
+    const originKey = carrying.originDayKey || event.dayKey;
+    const peekCrossDay =
+      carrying.phase === "carrying" && carrying.peeked && carrying.viewDayKey !== originKey;
+    if (vm === "day" && carrying.phase === "carrying") {
+      const targetMinutes = isAllDayEvent(event, timeZone) ? 0 : Math.round((preview?.startHour ?? 0) * 60);
+      const { state, effect } = crossDayRelease(
+        carrying,
+        surface,
+        surface === "grid" ? targetMinutes : undefined,
+        plan.active,
+      );
+      setCrossDay(state);
+      if (effect.outcome === "cancel" || effect.outcome === "interrupted") {
+        restoreCrossDayView(carrying.originDayKey, carrying.scrollMinutes);
+        return;
+      }
+      if (surface !== "grid" || !preview) return;
+      const targetDay = carrying.peeked && carrying.viewDayKey !== originKey ? carrying.viewDayKey : preview.dayKey;
+      const saveHour = isAllDayEvent(event, timeZone) ? 0 : preview.startHour;
+      preview = { ...preview, dayKey: targetDay, startHour: saveHour };
+      const crossDaySave = effect.outcome === "cross-day-save" || (peekCrossDay && surface === "grid");
+      if (crossDaySave) {
+        const start = atHour(preview.dayKey, preview.startHour, timeZone);
+        const end = isAllDayEvent(event, timeZone)
+          ? atHour(preview.dayKey, 24, timeZone)
+          : atHour(preview.dayKey, preview.startHour + (originRef.current?.duration ?? event.endHour - event.startHour), timeZone);
+        if (!start || !end) return;
+        if (plan.active && effect.stage) {
+          stagePreview(event.id, preview);
+          restoreCrossDayView(originKey, carrying.scrollMinutes);
+          return;
+        }
+        if (event.fixed) {
+          setOverlay({ kind: "fixed", id: event.id, start, end });
+          restoreCrossDayView(originKey, carrying.scrollMinutes);
+          return;
+        }
+        setTraySaveMessage(null);
+        setTrayTargetDay(null);
+        setCrossDayTrayPending(true);
+        setTrayHoldUntilAnchor(originKey);
+        setAnchor(preview.dayKey);
+        void saveQuick(event, start, end, false, { deferTray: true }).then((deferred) => {
+          window.setTimeout(() => {
+            restoreCrossDayView(originKey, carrying.scrollMinutes);
+            window.setTimeout(() => {
+              if (!deferred) return;
+              setCrossDayTrayPending(false);
+              setTrayHoldUntilAnchor(null);
+              setTraySaveMessage(deferred.line);
+              setTrayTargetDay(deferred.targetDay);
+              setTrayMovedId(event.id);
+              if (deferred.undo) setTraySaveUndo(() => deferred.undo!);
+              pushToast(deferred.line, deferred.undo ?? undefined);
+            }, 150);
+          }, 500);
+        });
+        return;
+      }
+    }
     if (!preview) return;
     const start = atHour(preview.dayKey, preview.startHour, timeZone);
     const end = atHour(preview.dayKey, preview.startHour + (originRef.current?.duration ?? event.endHour - event.startHour), timeZone);
@@ -713,46 +1052,115 @@ export function CalendarShell(props: Props) {
     if (tip) setTip(false);
     const pointerId = pointer.pointerId;
     const touch = pointer.pointerType === "touch";
+    const touchId = touch ? pointerId : -1;
     let panning = false;
     let panOriginY = pointer.clientY;
     let panScroll = gridRef.current?.scrollTop ?? 0;
-    function move(native: PointerEvent) {
-      if (native.pointerId !== pointerId) return;
+    const detach = () => {
+      window.removeEventListener("pointermove", onPointerMove);
+      window.removeEventListener("pointerup", onPointerUp);
+      window.removeEventListener("pointercancel", onPointerUp);
+      window.removeEventListener("touchmove", onTouchMove);
+      window.removeEventListener("touchend", onTouchEnd);
+      window.removeEventListener("touchcancel", onTouchEnd);
+    };
+    function applyMove(clientX: number, clientY: number) {
       if (panning) {
-        if (gridRef.current) gridRef.current.scrollTop = panScroll - (native.clientY - panOriginY);
+        if (gridRef.current) gridRef.current.scrollTop = panScroll - (clientY - panOriginY);
         return;
       }
       const current = gestureRef.current;
-      const updated = gestureMove(current, { x: native.clientX, y: native.clientY }, performance.now());
+      const updated = gestureMove(current, { x: clientX, y: clientY }, performance.now());
       if (touch && current.phase === "pending" && updated.phase === "idle") {
         panning = true;
         panOriginY = current.origin.y;
         panScroll = gridRef.current?.scrollTop ?? 0;
         gestureRef.current = updated;
-        if (gridRef.current) gridRef.current.scrollTop = panScroll - (native.clientY - panOriginY);
+        if (gridRef.current) gridRef.current.scrollTop = panScroll - (clientY - panOriginY);
         flushSync(() => setGesture(updated));
         return;
+      }
+      if (updated.phase === "lifted" && current.phase !== "lifted" && mode === "day" && originRef.current) {
+        const grid = gridRef.current;
+        setCrossDay(crossDayLift(originRef.current.id, originRef.current.dayKey, (grid?.scrollTop ?? 0) / PX_PER_MINUTE));
+      }
+      if (updated.phase === "lifted" && mode === "day") {
+        const stripEl = document.querySelector('[data-testid="day-strip"]');
+        if (stripEl instanceof HTMLElement) {
+          const rect = stripEl.getBoundingClientRect();
+          if (clientY >= rect.top && clientY <= rect.bottom) {
+            setCrossDay((state) => {
+              let next = state.phase === "carrying" ? crossDayStripEnter(state) : state;
+              for (const key of weekKeys) {
+                const cell = stripEl.querySelector<HTMLElement>(`[data-strip-key="${key}"]`);
+                if (!cell) continue;
+                const box = cell.getBoundingClientRect();
+                if (clientX >= box.left && clientX <= box.right) {
+                  next = crossDayHoverCell(next, key);
+                  break;
+                }
+              }
+              return next;
+            });
+          } else {
+            setCrossDay((state) => (state.onStrip ? crossDayStripLeave(state) : state));
+          }
+        }
+        const grid = gridRef.current;
+        const topZone = document.querySelector('[data-testid="autoscroll-zone-top"]');
+        const bottomZone = document.querySelector('[data-testid="autoscroll-zone-bottom"]');
+        const stamp = performance.now();
+        let zone: "top" | "bottom" | null = null;
+        if (topZone instanceof HTMLElement) {
+          const box = topZone.getBoundingClientRect();
+          if (clientY >= box.top && clientY <= box.bottom) zone = "top";
+        }
+        if (!zone && bottomZone instanceof HTMLElement) {
+          const box = bottomZone.getBoundingClientRect();
+          if (clientY >= box.top && clientY <= box.bottom) zone = "bottom";
+        }
+        if (zone !== autoScrollRef.current.zone) autoScrollRef.current = { zone, since: stamp };
+        if (grid && zone && stamp - autoScrollRef.current.since >= 400) {
+          if (zone === "top") {
+            grid.scrollTop = Math.max(0, grid.scrollTop - 8);
+          } else {
+            const maxScroll = Math.max(0, grid.scrollHeight - grid.clientHeight);
+            const nextDay = grid.querySelector('[data-testid="next-day-link"]');
+            const gridBox = grid.getBoundingClientRect();
+            const stop = nextDay instanceof HTMLElement && nextDay.getBoundingClientRect().top <= gridBox.bottom + 2;
+            if (!stop) grid.scrollTop = Math.min(maxScroll, grid.scrollTop + 8);
+          }
+        }
       }
       gestureRef.current = updated;
       flushSync(() => setGesture(updated));
     }
-    function up(native: PointerEvent) {
-      if (native.pointerId !== pointerId) return;
-      window.removeEventListener("pointermove", move);
-      window.removeEventListener("pointerup", up);
-      window.removeEventListener("pointercancel", up);
+    function applyUp(clientX: number, clientY: number, kind: "pointerup" | "pointercancel") {
+      detach();
       if (panning) {
         gestureRef.current = { phase: "idle" };
         setGesture({ phase: "idle" });
         return;
       }
+      autoScrollRef.current = { zone: null, since: 0 };
+      const carryingUp = crossDayRef.current;
+      if (kind === "pointercancel" && carryingUp.phase === "carrying") {
+        setCrossDay(crossDayInterrupt(carryingUp).state);
+        restoreCrossDayView(carryingUp.originDayKey, carryingUp.scrollMinutes);
+        gestureRef.current = { phase: "idle" };
+        setGesture({ phase: "idle" });
+        return;
+      }
+      const surface = crossDaySurfaceAt(clientX, clientY);
       const current = gestureRef.current;
       const point = current.phase === "idle"
-        ? { x: native.clientX, y: native.clientY }
+        ? { x: clientX, y: clientY }
         : current.point;
       const released = gestureMove(current, point, performance.now());
       const result = gestureUp(released);
-      if (native.type !== "pointercancel" && result.tap) {
+      const peeking = carryingUp.phase === "carrying" && carryingUp.peeked;
+      const peekDrop = peeking && surface === "grid";
+      if (kind !== "pointercancel" && result.tap && !peeking) {
         const eventId = event.id;
         let sawClick = false;
         const note = () => { sawClick = true; };
@@ -763,7 +1171,19 @@ export function CalendarShell(props: Props) {
           setOverlay({ kind: "event", id: eventId });
         }, 80);
       }
-      if (result.commit && released.phase === "lifted") {
+      if (released.phase === "lifted" && carryingUp.phase === "carrying" && surface === "strip") {
+        setCrossDay((state) => (state.phase === "carrying" ? crossDayStripEnter(state) : state));
+        gestureRef.current = { phase: "idle" };
+        setGesture({ phase: "idle" });
+        return;
+      }
+      if (released.phase === "lifted" && carryingUp.phase === "carrying" && !peekDrop && (surface !== "grid" || !result.commit)) {
+        finishGesture(released, surface);
+        gestureRef.current = { phase: "idle" };
+        setGesture({ phase: "idle" });
+        return;
+      }
+      if (released.phase === "lifted" && (result.commit || peekDrop)) {
         suppressClick.current = true;
         window.setTimeout(() => { suppressClick.current = false; }, 100);
         const face = gridRef.current?.querySelector(`[data-testid="block-${released.eventId}"] .face`);
@@ -772,30 +1192,99 @@ export function CalendarShell(props: Props) {
           settleFrom.current = { id: released.eventId, left: rect.left, top: rect.top, width: rect.width, height: rect.height };
         }
         setLockId(released.eventId);
-        finishGesture(released);
+        finishGesture(released, surface);
       }
       gestureRef.current = { phase: "idle" };
       setGesture({ phase: "idle" });
     }
-    window.addEventListener("pointermove", move);
-    window.addEventListener("pointerup", up);
-    window.addEventListener("pointercancel", up);
+    function onPointerMove(native: PointerEvent) {
+      if (native.pointerId !== pointerId) return;
+      applyMove(native.clientX, native.clientY);
+    }
+    function onPointerUp(native: PointerEvent) {
+      if (native.pointerId !== pointerId) return;
+      applyUp(native.clientX, native.clientY, native.type === "pointercancel" ? "pointercancel" : "pointerup");
+    }
+    function activeTouch(native: TouchEvent): Touch | null {
+      const exact = native.touches.length
+        ? Array.from(native.touches).find((t) => t.identifier === touchId)
+        : Array.from(native.changedTouches).find((t) => t.identifier === touchId);
+      if (exact) return exact;
+      return native.touches[0] ?? native.changedTouches[0] ?? null;
+    }
+    function onTouchMove(native: TouchEvent) {
+      const t = activeTouch(native);
+      if (!t) return;
+      applyMove(t.clientX, t.clientY);
+    }
+    function onTouchEnd(native: TouchEvent) {
+      const ended = activeTouch(native);
+      if (!ended) return;
+      applyUp(ended.clientX, ended.clientY, "pointerup");
+    }
+    window.addEventListener("pointermove", onPointerMove);
+    window.addEventListener("pointerup", onPointerUp);
+    window.addEventListener("pointercancel", onPointerUp);
+    if (touch) {
+      window.addEventListener("touchmove", onTouchMove, { passive: true });
+      window.addEventListener("touchend", onTouchEnd);
+      window.addEventListener("touchcancel", onTouchEnd);
+    }
   }
 
   function onGridPointerDown(pointer: React.PointerEvent<HTMLDivElement>) {
     if (pointer.button !== 0) return;
-    const hit = blockUnder(pointer.clientX, pointer.clientY);
+    if (crossDayRef.current.phase === "carrying" && crossDayRef.current.peeked) {
+      if (resumeCrossDayPointerDrag(pointer)) return;
+    }
+  const hit = blockUnder(pointer.clientX, pointer.clientY);
     if (hit) {
+      if (traySaveMessage) {
+        setTraySaveMessage(null);
+        setTrayTargetDay(null);
+      }
       startGesture(hit, pointer);
       return;
     }
     const target = pointer.target;
     if (target instanceof Element && target.closest(".block, .slim")) return;
-    if (pointer.pointerType === "touch") trackPan(pointer.pointerId, pointer.clientY);
+    const grid = gridRef.current;
+    if (grid && gesture.phase !== "lifted") {
+      const rect = grid.getBoundingClientRect();
+      if (pager.onPagerPointerDown(pointer, rect.left, grid.scrollTop)) return;
+    }
+    if (pointer.pointerType === "touch" && gesture.phase !== "lifted") trackPan(pointer.pointerId, pointer.clientY);
   }
 
   function onPointerDown(event: CalEvent, pointer: React.PointerEvent<HTMLButtonElement>) {
     if (pointer.button !== 0) return;
+    if (isMultiDayEvent(event, timeZone)) {
+      const pointerId = pointer.pointerId;
+      const down = performance.now();
+      let moved = false;
+      const holdTimer = window.setTimeout(() => {
+        if (!moved) openEvent(event);
+      }, HOLD_MS);
+      function move(native: PointerEvent) {
+        if (native.pointerId !== pointerId) return;
+        if (Math.hypot(native.clientX - pointer.clientX, native.clientY - pointer.clientY) > 8) {
+          moved = true;
+          window.clearTimeout(holdTimer);
+        }
+      }
+      function up(native: PointerEvent) {
+        if (native.pointerId !== pointerId) return;
+        window.clearTimeout(holdTimer);
+        window.removeEventListener("pointermove", move);
+        window.removeEventListener("pointerup", up);
+        window.removeEventListener("pointercancel", up);
+        if (native.type !== "pointercancel" && !moved && performance.now() - down < HOLD_MS) openEvent(event);
+      }
+      window.addEventListener("pointermove", move);
+      window.addEventListener("pointerup", up);
+      window.addEventListener("pointercancel", up);
+      return;
+    }
     startGesture(event, pointer);
   }
 
@@ -1100,12 +1589,21 @@ export function CalendarShell(props: Props) {
         />
       ) : (
         <header className="v3-header">
-          <h1>{mode === "day" ? dayTitle(anchor) : weekTitle(monday)}</h1>
+          <button type="button" className="a11y-nav" data-testid="a11y-previous-day" aria-label="Previous day" onClick={() => setAnchor(PlanTime.addDaysToKey(anchor, -1))}>‹</button>
+          <button type="button" className="title-jump" data-testid="day-title-jump" onClick={() => { setMonthAnchor(anchor); setOverlay({ kind: "jump" }); }}>
+            <h1>{mode === "month" ? dayTitle(monthAnchor).replace(/,.*/, "") : mode === "day" ? dayTitle(gridDayKey) : weekTitle(monday)}</h1>
+          </button>
+          {crossDay.phase === "carrying" || gesture.phase === "lifted" ? (
+            <span className="cross-day-chip" data-testid="cross-day-chip">{dayTitle(gridDayKey)}</span>
+          ) : null}
+          <CrossDayBanner originDayKey={crossDay.originDayKey || anchor} viewDayKey={crossDay.viewDayKey || gridDayKey} />
+          <ReentryHint show={crossDay.phase === "carrying" && crossDay.hoverDayKey === crossDay.originDayKey && crossDay.onStrip} originDayKey={crossDay.originDayKey || anchor} />
+          <button type="button" className="a11y-nav" data-testid="a11y-next-day" aria-label="Next day" onClick={() => setAnchor(PlanTime.addDaysToKey(anchor, 1))}>›</button>
           <button type="button" className="icon-btn" data-testid="plan-button" aria-label="Plan mode" title={PLAN_HINT} onClick={openPlan}>
             <PlanGlyph />
           </button>
           <button type="button" className="view-switch" data-testid="view-switch" aria-haspopup="menu" aria-expanded={overlay?.kind === "view"} onClick={() => setOverlay(overlay?.kind === "view" ? null : { kind: "view" })}>
-            {mode === "day" ? "Day" : "Week"} <Chevron />
+            {mode === "month" ? "Month" : mode === "day" ? "Day" : "Week"} <Chevron />
           </button>
           <button type="button" className="icon-btn" data-testid="more-button" aria-label="More" aria-haspopup="menu" aria-expanded={overlay?.kind === "menu"} onClick={() => setOverlay(overlay?.kind === "menu" ? null : { kind: "menu" })}>
             <MoreGlyph />
@@ -1113,17 +1611,62 @@ export function CalendarShell(props: Props) {
         </header>
       )}
       {mode === "day" ? (
-        <div className="v3-dow" role="radiogroup" aria-label="Days" data-testid="day-strip">
+        <div
+          className="v3-dow"
+          role="radiogroup"
+          aria-label="Days"
+          data-testid="day-strip"
+          data-blocks-day-pager={overlay != null ? "1" : "0"}
+          onPointerDownCapture={(event) => {
+            if (event.button !== 0) return;
+            const dayKey = stripDwellTargetFromPoint(event.clientX, event.clientY);
+            if (dayKey) beginStripDwell(dayKey);
+          }}
+          onPointerUpCapture={(event) => {
+            if (event.pointerType === "touch") return;
+            stopStripDwell();
+          }}
+          onPointerCancelCapture={(event) => {
+            if (event.pointerType === "touch") return;
+            stopStripDwell();
+          }}
+          onTouchStartCapture={(event) => {
+            const touch = event.changedTouches[0];
+            if (!touch) return;
+            const dayKey = stripDwellTargetFromPoint(touch.clientX, touch.clientY);
+            if (dayKey) beginStripDwell(dayKey);
+          }}
+          onTouchEndCapture={() => stopStripDwell()}
+          onTouchCancelCapture={() => stopStripDwell()}
+        >
           {weekKeys.map((key) => {
             const proposed = serverEvents.some((event) => event.dayKey === key && event.state === "proposed");
+            const selected = key === stripSelection;
+            const today = key === todayKey;
+            const hover = crossDay.hoverDayKey === key;
+            const origin = crossDay.originDayKey === key && crossDay.phase === "carrying";
             return (
               <button
                 key={key}
                 type="button"
-                className="day-pill"
+                className="day-pill strip-cell"
                 role="radio"
-                aria-checked={key === anchor}
-                onClick={() => setAnchor(key)}
+                aria-checked={selected}
+                data-testid={stripCellId(key)}
+                aria-describedby={`strip-cell-${key}`}
+                data-strip-key={key}
+                data-today={today ? "1" : "0"}
+                data-has-proposals={proposed ? "1" : "0"}
+                onClick={(click) => {
+                  if (crossDay.phase === "carrying") {
+                    click.preventDefault();
+                    return;
+                  }
+                  setAnchor(key);
+                }}
+                onPointerEnter={() => {
+                  if (crossDay.phase === "carrying" && crossDay.onStrip) setCrossDay((s) => crossDayHoverCell(s, key));
+                }}
                 onKeyDown={(keyEvent) => {
                   if (keyEvent.key !== "ArrowRight" && keyEvent.key !== "ArrowLeft") return;
                   keyEvent.preventDefault();
@@ -1132,22 +1675,72 @@ export function CalendarShell(props: Props) {
                 }}
               >
                 <small>{dayName(key)}</small>
-                <b>{Number(key.slice(-2))}</b>
-                {proposed ? <Sparkle /> : null}
+                <b className={today ? "today-underline" : ""}>{Number(key.slice(-2))}</b>
+                {proposed ? <span data-testid={`strip-proposal-${dayName(key).toLowerCase()}`} data-has-proposals={proposed ? "1" : "0"}><Sparkle /></span> : null}
+                {hover ? <DwellRing progress={dwellProgress(crossDay)} /> : null}
+                {origin ? <i data-testid="strip-cell-origin-highlight" className="strip-origin-mark" /> : null}
+                {crossDay.phase === "carrying" && key !== crossDay.originDayKey ? (
+                  <i className="strip-drop-hint" data-testid={`strip-drop-hint-${dayName(key).toLowerCase()}`} />
+                ) : null}
+                <span hidden data-testid={`strip-cell-${key}`} />
               </button>
             );
           })}
         </div>
-      ) : (
-        <div className="v3-dow" data-testid="week-strip">
+      ) : mode === "week" ? (
+        <div
+          className="v3-dow"
+          data-testid="week-strip"
+          data-week-offset={weekStripOffset === 0 ? "0" : weekStripOffset > 0 ? "+1" : "-1"}
+          onPointerDown={(e) => {
+            if (gesture.phase === "lifted") return;
+            const startX = e.clientX;
+            const pointerId = e.pointerId;
+            function move(native: PointerEvent) {
+              if (native.pointerId !== pointerId) return;
+            }
+            function up(native: PointerEvent) {
+              if (native.pointerId !== pointerId) return;
+              window.removeEventListener("pointermove", move);
+              window.removeEventListener("pointerup", up);
+              const dx = native.clientX - startX;
+              if (Math.abs(dx) > 40) setWeekStripOffset((o) => o + (dx < 0 ? 1 : -1));
+            }
+            window.addEventListener("pointermove", move);
+            window.addEventListener("pointerup", up);
+          }}
+        >
           {weekKeys.map((key) => (
-            <button key={key} type="button" className="week-head" data-today={key === todayKey} onClick={() => { setAnchor(key); setMode("day"); }}>
+            <button key={key} type="button" className="week-head" data-testid={stripCellId(key)} data-today={key === todayKey} onClick={() => { setAnchor(key); setMode("day"); }}>
               <small>{dayName(key).slice(0, 1)}</small>
               <b>{Number(key.slice(-2))}</b>
             </button>
           ))}
         </div>
-      )}
+      ) : null}
+      {mode === "month" ? (
+        <div className="v3-month" data-testid="month-view">
+          <MonthGridSheet
+            anchorDayKey={monthAnchor}
+            timeZone={timeZone}
+            selectedDayKey={anchor}
+            events={baseEvents.map((event) => ({ dayKey: event.dayKey, domain: event.domain }))}
+            detent="large"
+            onSelectDate={(key) => { setAnchor(key); setMonthAnchor(key); }}
+            onOpenDay={(key) => { setAnchor(key); setMode("day"); }}
+            onPrevMonth={() => setMonthAnchor(PlanTime.addDaysToKey(monthAnchor, -28))}
+            onNextMonth={() => setMonthAnchor(PlanTime.addDaysToKey(monthAnchor, 28))}
+            onToday={() => { const key = todayKey; setAnchor(key); setMonthAnchor(key); }}
+          />
+        </div>
+      ) : (
+      <>
+      {mode === "day" ? (
+        <>
+          <div className="autoscroll-zone-top" data-testid="autoscroll-zone-top" aria-hidden />
+          <div className="autoscroll-zone-bottom" data-testid="autoscroll-zone-bottom" data-above-tray={traySaveMessage && gesture.phase !== "lifted" ? "1" : "0"} aria-hidden />
+        </>
+      ) : null}
       <div
         className="v3-grid"
         ref={gridRef}
@@ -1155,10 +1748,67 @@ export function CalendarShell(props: Props) {
         data-hour-px={mode === "day" ? DAY_PX : WEEK_PX}
         data-origin={mode === "day" ? DAY_ORIGIN : WEEK_ORIGIN}
         data-gutter={mode === "day" ? DAY_GUTTER : WEEK_GUTTER}
+        data-scroll-hour={scrollHour}
+        data-hour-count={mode === "day" ? String(dayRowsFor(gridDayKey, timeZone).length) : String(weekHourMax)}
+        data-range="24h"
+        data-bottom-inset-pt={traySaveMessage ? "48" : "0"}
+        data-momentum="0"
         aria-busy={props.loading}
         onPointerDownCapture={onGridPointerDown}
+        onTouchStartCapture={(event) => {
+          if (crossDayRef.current.phase !== "carrying" || !crossDayRef.current.peeked) return;
+          const touch = event.changedTouches[0];
+          if (!touch) return;
+          resumeCrossDayPointerDrag({
+            pointerId: touch.identifier,
+            clientX: touch.clientX,
+            clientY: touch.clientY,
+            pointerType: "touch",
+          });
+        }}
+        onScroll={(e) => {
+          const node = e.currentTarget;
+          node.dataset.momentum = node.scrollTop !== parseFloat(node.dataset.lastScroll || "0") ? "1" : "0";
+          node.dataset.lastScroll = String(node.scrollTop);
+        }}
       >
-        <div className="grid-canvas" style={{ height: mode === "day" ? dayY(20) : weekY(20) }}>
+        {nowOffscreen && mode === "day" ? (
+          <NowChip label={exactClock(nowHour)} onJump={() => {
+            const grid = gridRef.current;
+            if (grid) grid.scrollTop = nowHour * 60 * PX_PER_MINUTE - grid.clientHeight / 2;
+          }} />
+        ) : null}
+        <div
+          className="day-pager"
+          data-testid={mode === "day" ? "day-pager" : "week-pager"}
+          data-enabled={pager.dataEnabled}
+          data-pan-kind={pager.panKind}
+          data-a11y-paged="1"
+          data-transition={reducedMotion ? "cross-fade" : "slide"}
+          data-offset-px={String(pager.offsetX)}
+          data-translate-x={!reducedMotion && pager.offsetX ? String(pager.offsetX) : undefined}
+          style={!reducedMotion && pager.offsetX ? { transform: `translateX(${pager.offsetX}px)` } : undefined}
+          onPointerDown={(e) => {
+            const grid = gridRef.current;
+            if (!grid) return;
+            const rect = grid.getBoundingClientRect();
+            if (pager.onPagerPointerDown(e, rect.left, grid.scrollTop)) e.stopPropagation();
+          }}
+        >
+        <div className="grid-canvas" style={{ height: mode === "day" ? PlanTime.dayHeightPx(gridDayKey, timeZone) + 44 : weekGridHeightPx(weekKeys, timeZone) + 44 }}>
+          {mode === "day" ? (
+            <HourRows rows={dayRowsFor(gridDayKey, timeZone)} width={Math.max(width, 320)} mode="day" dayKey={gridDayKey} />
+          ) : (
+            <>
+              <div
+                className="week-hour-axis"
+                data-testid="week-hour-axis"
+                style={{ height: weekGridHeightPx(weekKeys, timeZone) }}
+              >
+                <HourRows rows={weekRowsFor(monday, timeZone)} width={Math.max(width, 320)} mode="week" />
+              </div>
+            </>
+          )}
           {props.loading ? <div className="skeleton" aria-hidden="true"><i /><i /><i /></div> : null}
           {!props.loading && props.error && serverEvents.length === 0 ? (
             <div className="error-panel" role="alert">
@@ -1172,9 +1822,18 @@ export function CalendarShell(props: Props) {
               {loose.length > 0 ? <button type="button" onClick={() => setOverlay({ kind: "unscheduled" })}>Show unscheduled</button> : null}
             </div>
           ) : null}
+          {mode === "day" && (allDayEvents.length > 0 || multiDayEvents.length > 0) ? (
+            <AllDayRow
+              allDay={allDayEvents}
+              multiDay={multiDayEvents}
+              timeZone={timeZone}
+              onPointerDown={onPointerDown}
+              onOpen={openEvent}
+            />
+          ) : null}
           {mode === "day" ? (
             <DayCanvas
-              events={dayEvents}
+              events={timedDayEvents}
               width={Math.max(width, 320)}
               nowHour={anchor === todayKey ? nowHour : null}
               drag={dragPreview}
@@ -1185,12 +1844,14 @@ export function CalendarShell(props: Props) {
               onPointerDown={onPointerDown}
               onKeyDown={onBlockKey}
               onOpen={openEvent}
+              highlightId={crossHighlightId}
             />
           ) : (
             <WeekCanvas
               events={weekEvents}
               layoutEvents={baseEvents.filter((event) => weekKeys.includes(event.dayKey))}
               weekKeys={weekKeys}
+              timeZone={timeZone}
               width={Math.max(width, 320)}
               nowHour={weekKeys.includes(todayKey) ? nowHour : null}
               todayIndex={weekKeys.indexOf(todayKey)}
@@ -1210,8 +1871,17 @@ export function CalendarShell(props: Props) {
               }}
             />
           )}
+          {mode === "day" ? (
+            <NextDayRow nextKey={PlanTime.addDaysToKey(gridDayKey, 1)} onOpen={() => setAnchor(PlanTime.addDaysToKey(gridDayKey, 1))} />
+          ) : null}
+        </div>
         </div>
       </div>
+      </>
+      )}
+      {trayTargetDay ? (
+        <i className="cross-day-target-dot" data-testid={`cross-day-target-dot-${dayName(trayTargetDay).toLowerCase()}`} aria-hidden />
+      ) : null}
       {trayOpen ? <button type="button" className="tray-scrim" data-testid="tray-scrim" aria-label="Close tray" onClick={() => setTrayOpen(false)} /> : null}
       <div className="tray-sheet" data-open={trayOpen ? "1" : "0"} data-testid="tray-sheet" role="dialog" aria-label="Calendar tray" aria-hidden={trayOpen ? undefined : true}>
         <button type="button" className="tray-grip" data-testid="tray-sheet-grip" aria-label="Calendar tray" onPointerDown={onTrayPointer} />
@@ -1225,6 +1895,35 @@ export function CalendarShell(props: Props) {
           <p className="sub">{(props.meta?.sync_label || "").replaceAll("NOT synced", "Not synced")}</p>
         </div>
       </div>
+      {traySaveMessage && (trayHoldUntilAnchor == null || anchor === trayHoldUntilAnchor) ? (
+        <div className="tray-save-message" data-testid="tray-save-message" role="status">
+          <button
+            type="button"
+            data-testid="tray-save-message-text"
+            className="tray-save-text"
+            onClick={() => {
+              if (!trayTargetDay) return;
+              const moved = baseEvents.find((item) => item.id === trayMovedId) ?? baseEvents.find((item) => item.dayKey === trayTargetDay);
+              setAnchor(trayTargetDay);
+              if (moved) {
+                setCrossHighlightId(moved.id);
+                const grid = gridRef.current;
+                if (grid) {
+                  grid.scrollTop = Math.max(0, moved.startHour * 60 * PX_PER_MINUTE - grid.clientHeight / 3);
+                }
+                window.setTimeout(() => setCrossHighlightId(null), 300);
+              }
+            }}
+          >
+            {traySaveMessage}
+          </button>
+          {traySaveUndo ? (
+            <button type="button" onClick={() => { const run = traySaveUndo; setTraySaveUndo(null); setTraySaveMessage(null); void run(); }}>Undo</button>
+          ) : undo ? (
+            <button type="button" onClick={() => { const run = undo; setTraySaveMessage(null); setToast(null); setUndo(null); void run(); }}>Undo</button>
+          ) : null}
+        </div>
+      ) : null}
       <div className="v3-tray">
         <button type="button" className="tray-grip" data-testid="tray-grip" aria-label="Calendar tray" onPointerDown={onTrayPointer} />
         <button type="button" className="unscheduled" data-testid="unscheduled" onClick={() => setTrayOpen(true)}>
@@ -1259,6 +1958,36 @@ export function CalendarShell(props: Props) {
         <div className="view-menu" role="menu" aria-label="Calendar view">
           <button type="button" role="menuitem" onClick={() => { setMode("day"); setOverlay(null); }}>Day</button>
           <button type="button" role="menuitem" onClick={() => { setMode("week"); setOverlay(null); }}>Week</button>
+          <button type="button" role="menuitem" onClick={() => { setMode("month"); setMonthAnchor(anchor); setOverlay(null); }}>Month</button>
+        </div>
+      ) : null}
+      {overlay.kind === "jump" ? (
+        <div data-testid="jump-sheet" data-blocks-day-pager="1">
+          <MonthGridSheet
+            anchorDayKey={monthAnchor}
+            timeZone={timeZone}
+            selectedDayKey={anchor}
+            events={baseEvents.map((event) => ({ dayKey: event.dayKey, domain: event.domain }))}
+            detent="medium"
+            onSelectDate={(key) => {
+              if (overlay.kind === "jump" && overlay.moveEventId) {
+                const event = serverEvents.find((item) => item.id === overlay.moveEventId);
+                if (event) {
+                  const start = atHour(key, event.startHour, timeZone);
+                  const end = atHour(key, event.endHour, timeZone);
+                  if (start && end) void saveQuick(event, start, end);
+                }
+                setOverlay(null);
+                return;
+              }
+              setAnchor(key);
+              setOverlay(null);
+            }}
+            onOpenDay={(key) => { setAnchor(key); setMode("day"); setOverlay(null); }}
+            onPrevMonth={() => setMonthAnchor(PlanTime.addDaysToKey(monthAnchor, -28))}
+            onNextMonth={() => setMonthAnchor(PlanTime.addDaysToKey(monthAnchor, 28))}
+            onToday={() => { const key = todayKey; setAnchor(key); setOverlay(null); }}
+          />
         </div>
       ) : null}
       {overlay.kind === "menu" ? (
@@ -1288,6 +2017,10 @@ export function CalendarShell(props: Props) {
             void retryRefused(event.outboxId, event.title, event.start, event.end, unplacedToast(event.title), event.id);
           }}
           onTime={() => pushToast("Drag the block to change the time.")}
+          onDatePick={() => {
+            setMonthAnchor(anchor);
+            setOverlay({ kind: "jump", moveEventId: overlay.id });
+          }}
         />
       ) : null}
       {overlay.kind === "review" ? (
@@ -1334,26 +2067,38 @@ function previewFrom(
   grid: HTMLDivElement | null,
   width: number,
   previousSnap: number | null,
+  displayDayKey: string,
+  timeZone: string,
+  crossPeeking: boolean,
 ): Preview | null {
   if (gesture.phase !== "lifted" || !origin || !grid) return null;
   const rect = grid.getBoundingClientRect();
+  const dayKey = mode === "day" ? (crossPeeking ? displayDayKey : origin.dayKey) : origin.dayKey;
+  const scrollTop = grid.scrollTop;
+  const originY = gesture.origin.y - rect.top + scrollTop;
+  const pointY = gesture.point.y - rect.top + scrollTop;
+  const travel = Math.hypot(gesture.point.x - gesture.origin.x, gesture.point.y - gesture.origin.y);
+  const absDrop = crossPeeking && travel < COMMIT_PX;
+  const pxPerHour = mode === "day" ? DAY_PX : WEEK_PX;
   const moved = moveByPointer({
-    originStart: origin.startHour,
+    originStart: absDrop ? 0 : origin.startHour,
     originDay: Math.max(0, origin.dayIndex),
     duration: origin.duration,
-    deltaY: gesture.point.y - gesture.origin.y,
+    deltaY: absDrop ? pointY : pointY - originY,
     pointerX: gesture.point.x - rect.left,
-    pxPerHour: mode === "day" ? DAY_PX : WEEK_PX,
+    pxPerHour,
     gutter: mode === "day" ? DAY_GUTTER : WEEK_GUTTER,
     columnWidth: mode === "day" ? width : weekColumnWidth(width),
     allowDayChange: mode === "week",
     previousSnap,
+    dayKey,
+    timeZone,
   });
-  if (Math.hypot(gesture.point.x - gesture.origin.x, gesture.point.y - gesture.origin.y) < COMMIT_PX) return null;
+  if (travel < COMMIT_PX && !crossPeeking) return null;
   return {
     id: origin.id,
     dayIndex: moved.day,
-    dayKey: mode === "week" ? PlanTime.addDaysToKey(monday, moved.day) : origin.dayKey,
+    dayKey: mode === "week" ? PlanTime.addDaysToKey(monday, moved.day) : dayKey,
     startHour: moved.start,
   };
 }
@@ -1535,6 +2280,46 @@ function proposalTimes(proposal: Proposal): { status: string; starts_at?: string
   };
 }
 
+function AllDayRow(props: {
+  allDay: CalEvent[];
+  multiDay: CalEvent[];
+  timeZone: string;
+  onPointerDown: (event: CalEvent, pointer: React.PointerEvent<HTMLButtonElement>) => void;
+  onOpen: (event: CalEvent) => void;
+}) {
+  return (
+    <div className="all-day-row" data-testid="all-day-row">
+      {props.allDay.map((event) => (
+        <button
+          key={event.id}
+          type="button"
+          className="all-day-chip block"
+          data-testid={`block-${event.id}`}
+          aria-label={eventLabel(event)}
+          onPointerDown={(pointer) => props.onPointerDown(event, pointer)}
+          onClick={() => props.onOpen(event)}
+        >
+          {event.title}
+        </button>
+      ))}
+      {props.multiDay.map((event) => (
+        <button
+          key={event.id}
+          type="button"
+          className="all-day-chip block"
+          data-testid={`block-${event.id}`}
+          data-draggable="0"
+          aria-label={multiDayLabel(event, props.timeZone)}
+          onPointerDown={(pointer) => props.onPointerDown(event, pointer)}
+          onClick={() => props.onOpen(event)}
+        >
+          {multiDayLabel(event, props.timeZone)}
+        </button>
+      ))}
+    </div>
+  );
+}
+
 function DayCanvas(props: {
   events: CalEvent[];
   width: number;
@@ -1544,6 +2329,7 @@ function DayCanvas(props: {
   settle: Settle | null;
   lockId: string | null;
   openId: string | null;
+  highlightId: string | null;
   onPointerDown: (event: CalEvent, pointer: React.PointerEvent<HTMLButtonElement>) => void;
   onKeyDown: (event: CalEvent, key: React.KeyboardEvent) => void;
   onOpen: (event: CalEvent) => void;
@@ -1552,20 +2338,10 @@ function DayCanvas(props: {
   const boxes = dayBoxes(timed, props.width);
   const taps = dayTaps(timed, props.width);
   const markY = props.drag ? dayY(props.drag.startHour) : null;
-  const hours = [];
-  for (let hour = 9; hour <= 18; hour += 1) hours.push(hour);
   return (
     <>
       <div className="workband" style={{ left: DAY_GUTTER, top: dayY(9), right: 0, height: dayY(17) - dayY(9) }} />
       <div className="work-end" style={{ top: dayY(17) - 4 }}>Work hours end</div>
-      {hours.map((hour) => (
-        <div key={hour}>
-          <div className="hour-line" style={{ top: dayY(hour) }} />
-          {nearMark(markY, dayY(hour), 15) ? null : (
-            <div className="hour-label" style={{ top: dayY(hour), right: props.width - DAY_GUTTER + 8 }}>{clock(hour)}</div>
-          )}
-        </div>
-      ))}
       {props.drag ? <div className="ghost" style={ghostStyle(boxes.find((box) => box.id === props.drag?.id))} /> : null}
       {props.events.map((event) => {
         const box = boxes.find((item) => item.id === event.id);
@@ -1589,6 +2365,7 @@ function DayCanvas(props: {
             glow={props.glow.includes(event.id)}
             settle={props.settle}
             lockId={props.lockId}
+            highlight={props.highlightId === event.id ? "cross-day" : undefined}
             onPointerDown={props.onPointerDown}
             onKeyDown={props.onKeyDown}
             onOpen={props.onOpen}
@@ -1596,7 +2373,7 @@ function DayCanvas(props: {
         );
       })}
       {props.nowHour != null ? <NowMark hour={props.nowHour} left={DAY_GUTTER} width={props.width - DAY_GUTTER} hidePill={hideNowPill(markY, dayY(props.nowHour), 11, 8)} /> : null}
-      {props.drag ? <DayPill hour={props.drag.startHour} blockX={boxes.find((box) => box.id === props.drag?.id)?.x ?? DAY_GUTTER} /> : null}
+      {props.drag ? <DayPill hour={props.drag.startHour} blockX={boxes.find((box) => box.id === props.drag?.id)?.x ?? DAY_GUTTER} data-testid="gutter-drag-pill" /> : null}
     </>
   );
 }
@@ -1611,14 +2388,14 @@ function ghostStyle(box: { x: number; y: number; w: number; h: number } | undefi
   return { left: box.x, top: box.y, width: box.w, height: box.h };
 }
 
-function DayPill({ hour, blockX }: { hour: number; blockX: number }) {
+function DayPill({ hour, blockX, "data-testid": testId }: { hour: number; blockX: number; "data-testid"?: string }) {
   const y = dayY(hour);
   const width = 52;
   const x = DAY_GUTTER - 6 - width;
   return (
     <>
       <div className="leader" style={{ left: DAY_GUTTER - 6, width: Math.max(0, blockX - DAY_GUTTER + 4), top: y }} />
-      <div className="gutter-pill" style={{ left: x, top: y - 11, width, height: 22 }}>{gutterClock(hour)}</div>
+      <div className="gutter-pill" data-testid={testId} style={{ left: x, top: y - 11, width, height: 22 }}>{gutterClock(hour)}</div>
     </>
   );
 }
@@ -1645,6 +2422,7 @@ function EventButton(props: {
   glow: boolean;
   settle: Settle | null;
   lockId: string | null;
+  highlight?: "cross-day";
   onPointerDown: (event: CalEvent, pointer: React.PointerEvent<HTMLButtonElement>) => void;
   onKeyDown: (event: CalEvent, key: React.KeyboardEvent) => void;
   onOpen: (event: CalEvent) => void;
@@ -1662,6 +2440,7 @@ function EventButton(props: {
       aria-label={eventLabel(event)}
       data-testid={`block-${event.id}`}
       data-title={event.title}
+      data-highlight={props.highlight}
       onPointerDown={(pointer) => props.onPointerDown(event, pointer)}
       onKeyDown={(key) => props.onKeyDown(event, key)}
       onClick={() => props.onOpen(event)}
@@ -1702,6 +2481,7 @@ function WeekCanvas(props: {
   events: CalEvent[];
   layoutEvents: CalEvent[];
   weekKeys: string[];
+  timeZone: string;
   width: number;
   nowHour: number | null;
   todayIndex: number;
@@ -1733,13 +2513,15 @@ function WeekCanvas(props: {
       {[0, 1, 2, 3, 4].map((day) => (
         <div key={day} className="workband" style={{ left: WEEK_GUTTER + day * colW, top: weekY(9), width: colW, height: weekY(17) - weekY(9) }} />
       ))}
-      {Array.from({ length: 13 }, (_, index) => WEEK_ORIGIN + index).map((hour) => (
-        <div key={hour}>
-          <div className="hour-line" style={{ top: weekY(hour) }} />
-          {hour < 20 && !nearMark(markY, weekY(hour), 12) ? (
-            <div className="hour-label" style={{ top: weekY(hour), left: 0, width: WEEK_GUTTER, textAlign: "right", paddingRight: 4 }}>{clock(hour)}</div>
-          ) : null}
-        </div>
+      {props.weekKeys.map((key, day) => (
+        <div
+          key={key}
+          className="week-column"
+          data-testid={`week-column-${dayName(key).toLowerCase()}`}
+          data-scroll-synced="1"
+          data-dst-hours={String(PlanTime.dayMinutes(key, props.timeZone) / 60)}
+          style={{ position: "absolute", left: WEEK_GUTTER + day * colW, top: 0, width: colW, height: "100%", pointerEvents: "none" }}
+        />
       ))}
       {props.drag ? <div className="ghost" style={ghostStyle(boxes.find((box) => box.id === props.drag?.id))} /> : null}
       {props.events.map((event) => {
@@ -1910,11 +2692,12 @@ function EventSheet(props: {
   onDecide: (event: CalEvent, action: "approve" | "deny") => void;
   onRetry: (event: CalEvent) => void;
   onTime: () => void;
+  onDatePick: () => void;
 }) {
   const event = props.event;
   if (!event) return null;
   return (
-    <div className="sheet" role="dialog" aria-label={event.title}>
+    <div className="sheet" role="dialog" aria-label={event.title} data-testid="details-sheet">
       <div className="sheet-grip" />
       <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
         <h2>{event.title}</h2>
@@ -1923,9 +2706,12 @@ function EventSheet(props: {
         ) : null}
       </div>
       <p className="sub">{event.state === "unplaced" ? "Not on calendar" : event.state === "proposed" ? `Agent suggestion · ${domainLabel(event.domain)}` : domainLabel(event.domain)}</p>
-      <button type="button" className="time-row" onClick={props.onTime}>
+      <button type="button" className="time-row" data-testid="details-date-row" onClick={props.onDatePick}>
         <span>{dayTitle(event.dayKey)}</span>
         <span>{rangeLabel(event.startHour, event.endHour)} ›</span>
+      </button>
+      <button type="button" className="time-row quiet" data-testid="details-time-row" onClick={props.onTime}>
+        Change time
       </button>
       {event.explanation ? <p className="why">Why: {event.explanation}</p> : null}
       {event.state === "unplaced" ? (

@@ -1,15 +1,18 @@
 /** Day and week geometry from the approved v3 frames. Sizes are CSS pixels at 1x. */
 
-export const DAY_PX = 60;
-export const DAY_ORIGIN = 8.5;
+import { PX_PER_MINUTE } from "../plan/time";
+import { clampStartMinutes, snapStartMinutes } from "../v4/dayRange";
+
+export const DAY_PX = PX_PER_MINUTE * 60;
+export const DAY_ORIGIN = 0;
 export const DAY_GUTTER = 56;
 export const DAY_X0 = DAY_GUTTER + 4;
 export const DAY_RIGHT = 10;
 export const DAY_GAP = 6;
 export const WEEK_GUTTER = 36;
-export const WEEK_PX = 49.5;
-export const WEEK_ORIGIN = 8;
-export const WEEK_END = 20;
+export const WEEK_PX = PX_PER_MINUTE * 60;
+export const WEEK_ORIGIN = 0;
+export const WEEK_END = 24;
 export const WEEK_STRIP = 9;
 export const WEEK_LANE_GAP = 2;
 export const WORK_START = 9;
@@ -307,13 +310,23 @@ export function moveByPointer(input: {
   columnWidth: number;
   allowDayChange: boolean;
   previousSnap?: number | null;
+  dayKey?: string;
+  timeZone?: string;
 }): { day: number; start: number } {
   const raw = input.originStart + input.deltaY / input.pxPerHour;
-  let start = snapHourStable(input.previousSnap ?? null, raw, input.pxPerHour);
-  const latest = 24 - input.duration;
-  if (start < 0) start = 0;
-  if (start > latest) start = snapHour(latest);
-  if (start + input.duration > 24) start = snapHour(24 - input.duration);
+  let start: number;
+  if (!input.allowDayChange && input.dayKey && input.timeZone) {
+    const durationMinutes = input.duration * 60;
+    const previousMinutes = input.previousSnap != null ? input.previousSnap * 60 : null;
+    const snapped = snapStartMinutes(raw * 60, previousMinutes);
+    start = clampStartMinutes(snapped, durationMinutes, input.dayKey, input.timeZone) / 60;
+  } else {
+    start = snapHourStable(input.previousSnap ?? null, raw, input.pxPerHour);
+    const latest = 24 - input.duration;
+    if (start < 0) start = 0;
+    if (start > latest) start = snapHour(latest);
+    if (start + input.duration > 24) start = snapHour(24 - input.duration);
+  }
   let day = input.originDay;
   if (input.allowDayChange && input.pointerX >= input.gutter) {
     const index = Math.floor((input.pointerX - input.gutter) / input.columnWidth);
