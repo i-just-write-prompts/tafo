@@ -18,6 +18,7 @@ export default defineConfig({
   plugins: [react()],
   define: {
     __TAFO_REV__: JSON.stringify(revision()),
+    __TAFO_SLICE2__: JSON.stringify(process.env.VITE_TAFO_SLICE2 === "1" ? "1" : "0"),
   },
   server: {
     host: "127.0.0.1",

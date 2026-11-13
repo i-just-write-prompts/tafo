@@ -35,6 +35,8 @@ const browserEnv = {
   TAFO_GOOGLE_CALENDAR_ID: "",
   TAFO_WORK_INVITE_EMAIL: "",
   TAFO_E2E: "1",
+  TAFO_SLICE2: "1",
+  TAFO_FEEDBACK_MOCK_ISSUE: "42",
   PYTHONUNBUFFERED: "1",
 };
 
@@ -104,6 +106,7 @@ export default defineConfig({
       env: {
         ...process.env,
         TAFO_API_PROXY: `http://127.0.0.1:${apiPort}`,
+        VITE_TAFO_SLICE2: "1",
       },
       url: `http://127.0.0.1:${webPort}`,
       reuseExistingServer: !process.env.CI,

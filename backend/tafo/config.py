@@ -52,6 +52,11 @@ class Settings:
     static_dir: str = ""
     preview_password: str = ""
     e2e: bool = False
+    slice2: bool = False
+    github_token: str = ""
+    github_repo: str = "i-just-write-prompts/tafo"
+    github_repo_private: bool = False
+    feedback_mock_issue: int | None = None
 
     @classmethod
     def from_env(cls) -> Settings:
@@ -77,6 +82,8 @@ class Settings:
             work_invite_email = ""
             seed_demo = False
             e2e = False
+        mock_raw = os.environ.get("TAFO_FEEDBACK_MOCK_ISSUE", "").strip()
+        mock_issue = int(mock_raw) if mock_raw.isdigit() else None
         return cls(
             host=os.environ.get("TAFO_HOST", "127.0.0.1").strip() or "127.0.0.1",
             port=int(os.environ.get("TAFO_PORT", "8787")),
@@ -95,6 +102,12 @@ class Settings:
             static_dir=os.environ.get("TAFO_SERVE_STATIC_DIR", "").strip(),
             preview_password=os.environ.get("PREVIEW_PASSWORD", "").strip() if preview else "",
             e2e=e2e,
+            slice2=_flag(os.environ.get("TAFO_SLICE2"), preview),
+            github_token=os.environ.get("TAFO_GITHUB_TOKEN", "").strip(),
+            github_repo=os.environ.get("TAFO_GITHUB_REPO", "i-just-write-prompts/tafo").strip()
+            or "i-just-write-prompts/tafo",
+            github_repo_private=_flag(os.environ.get("TAFO_GITHUB_REPO_PRIVATE"), False),
+            feedback_mock_issue=mock_issue,
         )
 
     def validate(self) -> None:

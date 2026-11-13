@@ -58,7 +58,7 @@ def test_migrations_apply_once(tmp_path):
     try:
         first = apply_migrations(conn)
         second = apply_migrations(conn)
-        assert first == ["001_init", "002_indexes"]
+        assert first == ["001_init", "002_indexes", "003_slice2"]
         assert second == []
         names = {row["name"] for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'index'")}
         assert "idx_tasks_domain_status" in names

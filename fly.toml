@@ -23,6 +23,7 @@ primary_region = "iad"
   TAFO_GOOGLE_CALENDAR_ID = ""
   TAFO_WORK_INVITE_EMAIL = ""
   TAFO_HUMAN_EDITS_AUTO_APPROVE = "1"
+  TAFO_SLICE2 = "1"
 
 [http_service]
   internal_port = 8080

@@ -111,3 +111,31 @@ class PlanCommit(BaseModel):
     confirmed: bool = False
     moves: list[PlanMove] = Field(default_factory=list)
     approvals: list[PlanApproval] = Field(default_factory=list)
+
+
+class CategoryHourSpan(BaseModel):
+    domain: Literal["work", "home", "personal"]
+    weekday: int = Field(ge=0, le=6)
+    start_minutes: int = Field(ge=0, lt=24 * 60)
+    end_minutes: int = Field(gt=0, le=24 * 60)
+
+
+class CategoryHoursPut(BaseModel):
+    spans: list[CategoryHourSpan]
+
+
+class SacredWindowBody(BaseModel):
+    id: str | None = None
+    name: str = Field(min_length=1, max_length=120)
+    days_mask: int = Field(ge=1, le=127)
+    start_minutes: int = Field(ge=0, lt=24 * 60)
+    end_minutes: int = Field(gt=0, le=24 * 60)
+    agent_block: bool = True
+    heads_up: bool = True
+
+
+class FeedbackSubmit(BaseModel):
+    client_id: str = Field(min_length=8, max_length=64)
+    note: str = Field(min_length=1, max_length=5000)
+    context: dict = Field(default_factory=dict)
+    screenshot_base64: str | None = None

@@ -29,6 +29,17 @@ BODIES = {
     ("POST", "/api/calendar/outbox/{outbox_id}/retry"): None,
     ("POST", "/api/admin/backup"): None,
     ("POST", "/api/admin/restore"): {"confirm": "REPLACE_LOCAL_DATA", "snapshot": {}},
+    ("PUT", "/api/hours/category"): {"spans": []},
+    ("POST", "/api/hours/sacred"): {
+        "name": "Test",
+        "days_mask": 1,
+        "start_minutes": 600,
+        "end_minutes": 660,
+        "agent_block": True,
+        "heads_up": True,
+    },
+    ("DELETE", "/api/hours/sacred/{window_id}"): None,
+    ("POST", "/api/feedback"): {"client_id": "mut-auth-test", "note": "Agent blocked", "context": {}},
 }
 
 AGENT_ALLOWED = {("POST", "/api/hermes/proposals")}
