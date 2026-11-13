@@ -59,6 +59,4 @@ test("Undo after the return restores day, time and Proposed", async ({ page }, t
   const after = await readCalendar(page);
   const proposal = after.proposals.find((item) => item.id === budgetProposal.id);
   expect(proposal?.status).toBe("pending");
-  const proposal = (await readCalendar(page)).proposals.find((item) => item.id === budgetProposal.id);
-  expect(proposal?.status).toBe("pending");
 });
