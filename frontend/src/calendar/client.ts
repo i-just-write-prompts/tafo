@@ -57,16 +57,14 @@ export interface MoveResult {
 }
 
 export interface UndoRequest {
-  kind: "block" | "proposal";
+  kind: "block";
   title: string;
   startsAt: string;
   endsAt: string;
   timeZone: string;
   acknowledgeFixed?: boolean;
   /** Block returned by the move being undone. */
-  block?: CalendarBlock | null;
-  /** Proposal as it was before the move. The next version is applied here. */
-  proposal?: Proposal;
+  block: CalendarBlock;
 }
 
 export interface PlanMoveInput {
@@ -336,12 +334,6 @@ export function createCalendarClient(deps: CalendarDeps = {}): CalendarClient {
     },
 
     async undo(input) {
-      if (input.kind === "proposal") {
-        if (!input.proposal) throw new Error("Undoing a proposal needs the proposal from before the move.");
-        const proposal = await editProposal(input.proposal, input.proposal.version + 1, input.startsAt, input.endsAt);
-        return { outcome: "saved", block: null, proposal, idempotentReplay: false, outbox: null };
-      }
-      if (!input.block) throw new Error("Undoing a block needs the saved block.");
       return client.move({
         kind: "block",
         title: input.title,

@@ -72,6 +72,7 @@ export function MonthGridSheet(props: MonthGridSheetProps) {
   return (
     <div
       className="sheet month-grid-sheet"
+      data-testid="month-grid-sheet"
       data-detent={props.detent}
       role="dialog"
       aria-label="Jump to date"
@@ -117,6 +118,7 @@ export function MonthGridSheet(props: MonthGridSheetProps) {
             <button
               key={cell.dayKey}
               type="button"
+              data-testid={`month-grid-cell-${cell.dayKey}`}
               className={[
                 "month-grid-cell",
                 cell.inMonth ? "in-month" : "out-month",

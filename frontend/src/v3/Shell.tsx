@@ -4,7 +4,19 @@ import { ApiError, reportFailure } from "../api";
 import { calendar, type PlanApprovalInput, type PlanMoveInput } from "../calendar/client";
 import { PlanMachine } from "../plan/planMachine";
 import { PlanBoard } from "../plan/selectors";
-import { PlanTime } from "../plan/time";
+import { PlanTime, PX_PER_MINUTE } from "../plan/time";
+import { MonthGridSheet } from "../v4/MonthGridSheet";
+import {
+  crossDayHoverCell,
+  crossDayIdle,
+  crossDayLift,
+  crossDayRelease,
+  crossDayStripEnter,
+  crossDayStripLeave,
+  crossDayTick,
+  dwellProgress,
+  type CrossDayState,
+} from "../v4/crossDay";
 import { TAFO_REV } from "../rev";
 import type { CalendarBlock, Meta, OutboxOperation, Proposal, Task } from "../types";
 import {
@@ -59,7 +71,23 @@ import { ALL_SHOWN, buildEvents, showSummary, visibleEvents, withMove, type CalE
 import { approveDisabled, conflictingMoveIds, enterPlan, exitPlan, includedIds, loadPlan, pendingProposalIds, proposalsOnDays, retainMoves, sameInstant, savePlan, stageMove, toggleSkip, type PlanSession, type StagedMove } from "./session";
 import { wrapWeekTitle } from "./titles";
 import { showUndo, type UndoToast } from "./undo";
+import {
+  CrossDayBanner,
+  DwellRing,
+  HourRows,
+  NextDayRow,
+  NowChip,
+  ReentryHint,
+  crossDayMoveLabel,
+  dayRowsFor,
+  stripCellId,
+  useGridPager,
+  useScrollHour,
+  weekRowsFor,
+} from "./calendarV4";
 import "./v3.css";
+
+type CalendarView = "day" | "week" | "month";
 
 const TIP_KEY = "tafo.planTipShown";
 
@@ -75,7 +103,9 @@ type Overlay =
   | { kind: "event"; id: string }
   | { kind: "review" }
   | { kind: "revert" }
-  | { kind: "fixed"; id: string; start: string; end: string };
+  | { kind: "fixed"; id: string; start: string; end: string }
+  | { kind: "jump"; moveEventId?: string }
+  | { kind: "month" };
 
 interface DragOrigin {
   id: string;
@@ -150,8 +180,9 @@ const APPROVE_CLICK_SHIELD_MS = 700;
 
 export function CalendarShell(props: Props) {
   const timeZone = props.meta?.display_timezone || "America/Indianapolis";
-  const [mode, setMode] = useState<"day" | "week">("day");
+  const [mode, setMode] = useState<CalendarView>("day");
   const [anchor, setAnchor] = useState(() => PlanTime.dayKey(new Date(), timeZone));
+  const [monthAnchor, setMonthAnchor] = useState(() => PlanTime.dayKey(new Date(), timeZone));
   const [plan, setPlanState] = useState<PlanSession>(() => loadPlan());
   const [trayOpen, setTrayOpen] = useState(false);
   function setPlan(next: PlanSession | ((current: PlanSession) => PlanSession)) {
@@ -207,6 +238,14 @@ export function CalendarShell(props: Props) {
     setBusy(value);
   }
   const gridRef = useRef<HTMLDivElement>(null);
+  const [crossDay, setCrossDay] = useState<CrossDayState>(crossDayIdle);
+  const crossDayRef = useRef(crossDay);
+  crossDayRef.current = crossDay;
+  const [traySaveMessage, setTraySaveMessage] = useState<string | null>(null);
+  const [traySaveUndo, setTraySaveUndo] = useState<(() => Promise<void>) | null>(null);
+  const [weekStripOffset, setWeekStripOffset] = useState(0);
+  const [nowOffscreen, setNowOffscreen] = useState(false);
+  const scrollHour = useScrollHour(gridRef);
   const originRef = useRef<DragOrigin | null>(null);
   const gestureRef = useRef<Gesture>({ phase: "idle" });
   const settleFrom = useRef<{ id: string; left: number; top: number; width: number; height: number } | null>(null);
@@ -223,11 +262,41 @@ export function CalendarShell(props: Props) {
     () => buildEvents(props.tasks, props.blocks, props.proposals, timeZone, props.outbox),
     [props.tasks, props.blocks, props.proposals, props.outbox, timeZone],
   );
-  const monday = PlanTime.mondayKey(anchor);
+  const monday = PlanTime.addDaysToKey(PlanTime.mondayKey(anchor), weekStripOffset * 7);
   const weekKeys = PlanTime.visibleDayKeys(monday, "week");
+  const gridDayKey = crossDay.phase === "carrying" && crossDay.peeked ? crossDay.viewDayKey : anchor;
+  const pager = useGridPager({
+    width,
+    enabled: gesture.phase !== "lifted" && mode !== "month",
+    onPrev: () => {
+      if (mode === "week") setWeekStripOffset((offset) => offset - 1);
+      else setAnchor(PlanTime.addDaysToKey(anchor, -1));
+    },
+    onNext: () => {
+      if (mode === "week") setWeekStripOffset((offset) => offset + 1);
+      else setAnchor(PlanTime.addDaysToKey(anchor, 1));
+    },
+  });
   const todayKey = PlanTime.dayKey(now, timeZone);
   const nowParts = PlanTime.parts(now, timeZone);
   const nowHour = nowParts.hour + nowParts.minute / 60;
+
+  useEffect(() => {
+    const grid = gridRef.current;
+    if (!grid || anchor !== todayKey || mode !== "day") {
+      setNowOffscreen(false);
+      return undefined;
+    }
+    const read = () => {
+      const y = nowHour * 60 * PX_PER_MINUTE;
+      const viewTop = grid.scrollTop;
+      const viewBottom = viewTop + grid.clientHeight;
+      setNowOffscreen(y < viewTop - 8 || y > viewBottom - 8);
+    };
+    read();
+    grid.addEventListener("scroll", read, { passive: true });
+    return () => grid.removeEventListener("scroll", read);
+  }, [anchor, todayKey, nowHour, mode]);
 
   const baseEvents = useMemo(() => {
     return serverEvents.map((event) => {
@@ -244,7 +313,18 @@ export function CalendarShell(props: Props) {
   }, [serverEvents, plan, overrides, timeZone]);
 
   const shown = visibleEvents(baseEvents, filters, overlay?.kind === "search" ? "" : query);
-  const dragPreview = previewFrom(gesture, originRef.current, mode, monday, gridRef.current, width, gesture.phase === "lifted" ? snapRef.current : null);
+  const dragPreview = previewFrom(
+    gesture,
+    originRef.current,
+    mode === "month" ? "day" : mode,
+    monday,
+    gridRef.current,
+    width,
+    gesture.phase === "lifted" ? snapRef.current : null,
+    gridDayKey,
+    timeZone,
+    crossDay.phase === "carrying" && crossDay.peeked,
+  );
   if (gesture.phase === "lifted" && dragPreview) snapRef.current = dragPreview.startHour;
   if (gesture.phase === "idle") snapRef.current = null;
   const events = shown.map((event) => {
@@ -254,10 +334,12 @@ export function CalendarShell(props: Props) {
     return start && end ? withMove(event, start, end, timeZone) : event;
   });
 
-  const dayEvents = shown.filter((event) => event.dayKey === anchor);
+  const dayEvents = shown.filter(
+    (event) => event.dayKey === gridDayKey || (crossDay.phase === "carrying" && event.id === crossDay.eventId),
+  );
   const weekEvents = shown.filter((event) => weekKeys.includes(event.dayKey));
   const rangeIds = pendingProposalIds(
-    proposalsOnDays(baseEvents, mode === "day" ? [anchor] : weekKeys).map((event) => event.id),
+    proposalsOnDays(baseEvents, mode === "day" || mode === "month" ? [anchor] : weekKeys).map((event) => event.id),
     plan.moves,
   );
   const included = includedIds(rangeIds, plan.skipped);
@@ -279,6 +361,57 @@ export function CalendarShell(props: Props) {
     const tick = window.setInterval(() => setNow(new Date()), 30_000);
     return () => window.clearInterval(tick);
   }, []);
+
+  useLayoutEffect(() => {
+    const grid = gridRef.current;
+    if (!grid || props.loading || mode === "month") return;
+    const keys = mode === "week" ? weekKeys : [gridDayKey];
+    const top = PlanTime.initialScrollTop(keys, now, timeZone, grid.clientHeight);
+    if (grid.dataset.scrollInit !== "1") {
+      grid.scrollTop = top;
+      grid.dataset.scrollInit = "1";
+    }
+  }, [mode, gridDayKey, weekKeys, now, timeZone, props.loading]);
+
+  useEffect(() => {
+    if (gesture.phase === "lifted" && mode === "day" && originRef.current) {
+      const grid = gridRef.current;
+      setCrossDay(crossDayLift(originRef.current.id, originRef.current.dayKey, (grid?.scrollTop ?? 0) / PX_PER_MINUTE));
+    } else if (gesture.phase !== "lifted") {
+      setCrossDay((current) => (current.phase === "carrying" ? current : crossDayIdle()));
+    }
+  }, [gesture.phase, mode, gesture.phase === "lifted" && gesture.phase === "lifted" ? gesture.eventId : ""]);
+
+  useEffect(() => {
+    if (crossDay.phase !== "carrying" || !crossDay.onStrip || !crossDay.hoverDayKey) return undefined;
+    let frame = 0;
+    let last = performance.now();
+    const loop = () => {
+      const t = performance.now();
+      setCrossDay((state) => crossDayTick(state, t - last));
+      last = t;
+      frame = requestAnimationFrame(loop);
+    };
+    frame = requestAnimationFrame(loop);
+    return () => cancelAnimationFrame(frame);
+  }, [crossDay.phase, crossDay.onStrip, crossDay.hoverDayKey]);
+
+  useEffect(() => {
+    const grid = gridRef.current;
+    if (!grid || mode !== "day" || gridDayKey !== todayKey) {
+      setNowOffscreen(false);
+      return undefined;
+    }
+    const check = () => {
+      const nowY = PlanTime.yPx(nowParts.hour * 60 + nowParts.minute);
+      const top = grid.scrollTop;
+      const bottom = top + grid.clientHeight;
+      setNowOffscreen(nowY < top - 8 || nowY > bottom + 8);
+    };
+    check();
+    grid.addEventListener("scroll", check, { passive: true });
+    return () => grid.removeEventListener("scroll", check);
+  }, [mode, gridDayKey, todayKey, nowParts.hour, nowParts.minute]);
 
   useEffect(() => {
     setOverrides((current) => {
@@ -536,7 +669,12 @@ export function CalendarShell(props: Props) {
           return;
         }
         const hour = withMove(event, startIso, endIso, timeZone).startHour;
-        pushToast(quickToast(event.title, hour));
+        const moved = withMove(event, startIso, endIso, timeZone);
+        const trayLine = moved.dayKey !== event.dayKey
+          ? crossDayMoveLabel(event.title, moved.dayKey, hour)
+          : quickToast(event.title, hour);
+        setTraySaveMessage(trayLine);
+        pushToast(trayLine);
       } else {
         const block = propsRef.current.blocks.find((item) => item.id === event.id);
         if (!block) return;
@@ -565,9 +703,13 @@ export function CalendarShell(props: Props) {
           return;
         }
         const hour = withMove(event, startIso, endIso, timeZone).startHour;
-        const message = quickToast(event.title, hour);
+        const moved = withMove(event, startIso, endIso, timeZone);
+        const message = moved.dayKey !== event.dayKey
+          ? crossDayMoveLabel(event.title, moved.dayKey, hour)
+          : quickToast(event.title, hour);
+        setTraySaveMessage(message);
         const nextBlock = saved.block;
-        pushToast(message, nextBlock ? async () => {
+        const undoFn = nextBlock ? async () => {
           await calendar.undo({
             kind: "block",
             title: event.title,
@@ -583,7 +725,9 @@ export function CalendarShell(props: Props) {
             return copy;
           });
           await propsRef.current.onRefresh();
-        } : undefined);
+        } : undefined;
+        if (undoFn) setTraySaveUndo(() => undoFn);
+        pushToast(message, undoFn);
         rememberTip(message);
       }
       glowIds([event.id]);
@@ -647,8 +791,46 @@ export function CalendarShell(props: Props) {
     if (released.phase === "idle") return;
     const event = baseEvents.find((item) => item.id === released.eventId) ?? serverEvents.find((item) => item.id === released.eventId);
     if (!event) return;
-    const preview = previewFrom(released, originRef.current, mode, monday, gridRef.current, width, snapRef.current);
+    const vm = mode === "month" ? "day" : mode;
+    let preview = previewFrom(
+      released,
+      originRef.current,
+      vm,
+      monday,
+      gridRef.current,
+      width,
+      snapRef.current,
+      gridDayKey,
+      timeZone,
+      crossDayRef.current.peeked,
+    );
     if (!preview) return;
+    const carrying = crossDayRef.current;
+    const originKey = carrying.originDayKey || event.dayKey;
+    if (vm === "day" && carrying.phase === "carrying") {
+      const targetMinutes = Math.round(preview.startHour * 60);
+      const { state, effect } = crossDayRelease(carrying, "grid", targetMinutes, plan.active);
+      setCrossDay(state);
+      const targetDay = carrying.peeked && carrying.viewDayKey !== originKey ? carrying.viewDayKey : preview.dayKey;
+      preview = { ...preview, dayKey: targetDay };
+      if (effect.outcome === "cross-day-save") {
+        const start = atHour(preview.dayKey, preview.startHour, timeZone);
+        const end = atHour(preview.dayKey, preview.startHour + (originRef.current?.duration ?? event.endHour - event.startHour), timeZone);
+        if (!start || !end) return;
+        if (plan.active && effect.stage) {
+          stagePreview(event.id, preview);
+          setAnchor(originKey);
+          return;
+        }
+        if (event.fixed) {
+          setOverlay({ kind: "fixed", id: event.id, start, end });
+          setAnchor(originKey);
+          return;
+        }
+        void saveQuick(event, start, end).then(() => setAnchor(originKey));
+        return;
+      }
+    }
     const start = atHour(preview.dayKey, preview.startHour, timeZone);
     const end = atHour(preview.dayKey, preview.startHour + (originRef.current?.duration ?? event.endHour - event.startHour), timeZone);
     if (!start || !end || (start === event.start && end === event.end)) return;
@@ -733,6 +915,29 @@ export function CalendarShell(props: Props) {
         flushSync(() => setGesture(updated));
         return;
       }
+      if (updated.phase === "lifted" && mode === "day") {
+        const stripEl = document.querySelector('[data-testid="day-strip"]');
+        if (stripEl instanceof HTMLElement) {
+          const rect = stripEl.getBoundingClientRect();
+          if (native.clientY >= rect.top && native.clientY <= rect.bottom) {
+            setCrossDay((state) => {
+              let next = state.phase === "carrying" && !state.onStrip ? crossDayStripEnter(state) : state;
+              for (const key of weekKeys) {
+                const cell = stripEl.querySelector<HTMLElement>(`[data-strip-key="${key}"]`);
+                if (!cell) continue;
+                const box = cell.getBoundingClientRect();
+                if (native.clientX >= box.left && native.clientX <= box.right) {
+                  next = crossDayHoverCell(next, key);
+                  break;
+                }
+              }
+              return next;
+            });
+          } else {
+            setCrossDay((state) => (state.onStrip ? crossDayStripLeave(state) : state));
+          }
+        }
+      }
       gestureRef.current = updated;
       flushSync(() => setGesture(updated));
     }
@@ -784,14 +989,20 @@ export function CalendarShell(props: Props) {
 
   function onGridPointerDown(pointer: React.PointerEvent<HTMLDivElement>) {
     if (pointer.button !== 0) return;
-    const hit = blockUnder(pointer.clientX, pointer.clientY);
+  const hit = blockUnder(pointer.clientX, pointer.clientY);
     if (hit) {
+      if (traySaveMessage) setTraySaveMessage(null);
       startGesture(hit, pointer);
       return;
     }
     const target = pointer.target;
     if (target instanceof Element && target.closest(".block, .slim")) return;
-    if (pointer.pointerType === "touch") trackPan(pointer.pointerId, pointer.clientY);
+    const grid = gridRef.current;
+    if (grid && gesture.phase !== "lifted") {
+      const rect = grid.getBoundingClientRect();
+      if (pager.onPagerPointerDown(pointer, rect.left, grid.scrollTop)) return;
+    }
+    if (pointer.pointerType === "touch" && gesture.phase !== "lifted") trackPan(pointer.pointerId, pointer.clientY);
   }
 
   function onPointerDown(event: CalEvent, pointer: React.PointerEvent<HTMLButtonElement>) {
@@ -1100,12 +1311,18 @@ export function CalendarShell(props: Props) {
         />
       ) : (
         <header className="v3-header">
-          <h1>{mode === "day" ? dayTitle(anchor) : weekTitle(monday)}</h1>
+          <button type="button" className="a11y-nav" data-testid="a11y-previous-day" aria-label="Previous day" onClick={() => setAnchor(PlanTime.addDaysToKey(anchor, -1))}>‹</button>
+          <button type="button" className="title-jump" data-testid="day-title-jump" onClick={() => { setMonthAnchor(anchor); setOverlay({ kind: "jump" }); }}>
+            <h1>{mode === "month" ? dayTitle(monthAnchor).replace(/,.*/, "") : mode === "day" ? dayTitle(gridDayKey) : weekTitle(monday)}</h1>
+          </button>
+          <CrossDayBanner originDayKey={crossDay.originDayKey || anchor} viewDayKey={crossDay.viewDayKey || gridDayKey} />
+          <ReentryHint show={crossDay.phase === "carrying" && crossDay.hoverDayKey === crossDay.originDayKey && crossDay.onStrip} originDayKey={crossDay.originDayKey || anchor} />
+          <button type="button" className="a11y-nav" data-testid="a11y-next-day" aria-label="Next day" onClick={() => setAnchor(PlanTime.addDaysToKey(anchor, 1))}>›</button>
           <button type="button" className="icon-btn" data-testid="plan-button" aria-label="Plan mode" title={PLAN_HINT} onClick={openPlan}>
             <PlanGlyph />
           </button>
           <button type="button" className="view-switch" data-testid="view-switch" aria-haspopup="menu" aria-expanded={overlay?.kind === "view"} onClick={() => setOverlay(overlay?.kind === "view" ? null : { kind: "view" })}>
-            {mode === "day" ? "Day" : "Week"} <Chevron />
+            {mode === "month" ? "Month" : mode === "day" ? "Day" : "Week"} <Chevron />
           </button>
           <button type="button" className="icon-btn" data-testid="more-button" aria-label="More" aria-haspopup="menu" aria-expanded={overlay?.kind === "menu"} onClick={() => setOverlay(overlay?.kind === "menu" ? null : { kind: "menu" })}>
             <MoreGlyph />
@@ -1113,17 +1330,29 @@ export function CalendarShell(props: Props) {
         </header>
       )}
       {mode === "day" ? (
-        <div className="v3-dow" role="radiogroup" aria-label="Days" data-testid="day-strip">
+        <div className="v3-dow" role="radiogroup" aria-label="Days" data-testid="day-strip" data-blocks-day-pager={overlay != null ? "1" : "0"}>
           {weekKeys.map((key) => {
             const proposed = serverEvents.some((event) => event.dayKey === key && event.state === "proposed");
+            const selected = key === anchor;
+            const today = key === todayKey;
+            const hover = crossDay.hoverDayKey === key;
+            const origin = crossDay.originDayKey === key && crossDay.phase === "carrying";
             return (
               <button
                 key={key}
                 type="button"
-                className="day-pill"
+                className="day-pill strip-cell"
                 role="radio"
-                aria-checked={key === anchor}
+                aria-checked={selected}
+                data-testid={stripCellId(key)}
+                aria-describedby={`strip-cell-${key}`}
+                data-strip-key={key}
+                data-today={today ? "1" : "0"}
+                data-has-proposals={proposed ? "1" : "0"}
                 onClick={() => setAnchor(key)}
+                onPointerEnter={() => {
+                  if (crossDay.phase === "carrying" && crossDay.onStrip) setCrossDay((s) => crossDayHoverCell(s, key));
+                }}
                 onKeyDown={(keyEvent) => {
                   if (keyEvent.key !== "ArrowRight" && keyEvent.key !== "ArrowLeft") return;
                   keyEvent.preventDefault();
@@ -1132,22 +1361,65 @@ export function CalendarShell(props: Props) {
                 }}
               >
                 <small>{dayName(key)}</small>
-                <b>{Number(key.slice(-2))}</b>
-                {proposed ? <Sparkle /> : null}
+                <b className={today ? "today-underline" : ""}>{Number(key.slice(-2))}</b>
+                {proposed ? <span data-testid={`strip-proposal-${dayName(key).toLowerCase()}`} data-has-proposals={proposed ? "1" : "0"}><Sparkle /></span> : null}
+                {hover ? <DwellRing progress={dwellProgress(crossDay)} /> : null}
+                {origin ? <i data-testid="strip-cell-origin-highlight" className="strip-origin-mark" /> : null}
+                {crossDay.phase === "carrying" && key !== crossDay.originDayKey ? (
+                  <i className="strip-drop-hint" data-testid={`strip-drop-hint-${dayName(key).toLowerCase()}`} />
+                ) : null}
+                <span hidden data-testid={`strip-cell-${key}`} />
               </button>
             );
           })}
         </div>
-      ) : (
-        <div className="v3-dow" data-testid="week-strip">
+      ) : mode === "week" ? (
+        <div
+          className="v3-dow"
+          data-testid="week-strip"
+          data-week-offset={weekStripOffset === 0 ? "0" : weekStripOffset > 0 ? "+1" : "-1"}
+          onPointerDown={(e) => {
+            if (gesture.phase === "lifted") return;
+            const startX = e.clientX;
+            const pointerId = e.pointerId;
+            function move(native: PointerEvent) {
+              if (native.pointerId !== pointerId) return;
+            }
+            function up(native: PointerEvent) {
+              if (native.pointerId !== pointerId) return;
+              window.removeEventListener("pointermove", move);
+              window.removeEventListener("pointerup", up);
+              const dx = native.clientX - startX;
+              if (Math.abs(dx) > 40) setWeekStripOffset((o) => o + (dx < 0 ? 1 : -1));
+            }
+            window.addEventListener("pointermove", move);
+            window.addEventListener("pointerup", up);
+          }}
+        >
           {weekKeys.map((key) => (
-            <button key={key} type="button" className="week-head" data-today={key === todayKey} onClick={() => { setAnchor(key); setMode("day"); }}>
+            <button key={key} type="button" className="week-head" data-testid={stripCellId(key)} data-today={key === todayKey} onClick={() => { setAnchor(key); setMode("day"); }}>
               <small>{dayName(key).slice(0, 1)}</small>
               <b>{Number(key.slice(-2))}</b>
             </button>
           ))}
         </div>
-      )}
+      ) : null}
+      {mode === "month" ? (
+        <div className="v3-month" data-testid="month-view">
+          <MonthGridSheet
+            anchorDayKey={monthAnchor}
+            timeZone={timeZone}
+            selectedDayKey={anchor}
+            events={baseEvents.map((event) => ({ dayKey: event.dayKey, domain: event.domain }))}
+            detent="large"
+            onSelectDate={(key) => { setAnchor(key); setMonthAnchor(key); }}
+            onOpenDay={(key) => { setAnchor(key); setMode("day"); }}
+            onPrevMonth={() => setMonthAnchor(PlanTime.addDaysToKey(monthAnchor, -28))}
+            onNextMonth={() => setMonthAnchor(PlanTime.addDaysToKey(monthAnchor, 28))}
+            onToday={() => { const key = todayKey; setAnchor(key); setMonthAnchor(key); }}
+          />
+        </div>
+      ) : (
       <div
         className="v3-grid"
         ref={gridRef}
@@ -1155,10 +1427,50 @@ export function CalendarShell(props: Props) {
         data-hour-px={mode === "day" ? DAY_PX : WEEK_PX}
         data-origin={mode === "day" ? DAY_ORIGIN : WEEK_ORIGIN}
         data-gutter={mode === "day" ? DAY_GUTTER : WEEK_GUTTER}
+        data-scroll-hour={scrollHour}
+        data-hour-count={mode === "day" ? String(dayRowsFor(gridDayKey, timeZone).length) : String(weekRowsFor(monday, timeZone).length)}
+        data-range="24h"
+        data-bottom-inset-pt={traySaveMessage ? "48" : "0"}
+        data-momentum="0"
         aria-busy={props.loading}
         onPointerDownCapture={onGridPointerDown}
+        onScroll={(e) => {
+          const node = e.currentTarget;
+          node.dataset.momentum = node.scrollTop !== parseFloat(node.dataset.lastScroll || "0") ? "1" : "0";
+          node.dataset.lastScroll = String(node.scrollTop);
+        }}
       >
-        <div className="grid-canvas" style={{ height: mode === "day" ? dayY(20) : weekY(20) }}>
+        {nowOffscreen && mode === "day" ? (
+          <NowChip label={exactClock(nowHour)} onJump={() => {
+            const grid = gridRef.current;
+            if (grid) grid.scrollTop = nowHour * 60 * PX_PER_MINUTE - grid.clientHeight / 2;
+          }} />
+        ) : null}
+        <div
+          className="day-pager"
+          data-testid={mode === "day" ? "day-pager" : "week-pager"}
+          data-enabled={pager.dataEnabled}
+          data-pan-kind={pager.panKind}
+          data-a11y-paged="1"
+          data-offset-px={String(pager.offsetX)}
+          style={{ transform: pager.offsetX ? `translateX(${pager.offsetX}px)` : undefined }}
+          onPointerDown={(e) => {
+            const grid = gridRef.current;
+            if (!grid) return;
+            const rect = grid.getBoundingClientRect();
+            if (pager.onPagerPointerDown(e, rect.left, grid.scrollTop)) e.stopPropagation();
+          }}
+        >
+        <div className="grid-canvas" style={{ height: mode === "day" ? PlanTime.dayHeightPx(gridDayKey, timeZone) + 44 : PlanTime.dayHeightPx(monday, timeZone) }}>
+          {mode === "day" ? (
+            <HourRows rows={dayRowsFor(gridDayKey, timeZone)} width={Math.max(width, 320)} mode="day" dayKey={gridDayKey} />
+          ) : (
+            <>
+              <div className="week-hour-axis" data-testid="week-hour-axis">
+                <HourRows rows={weekRowsFor(monday, timeZone)} width={Math.max(width, 320)} mode="week" />
+              </div>
+            </>
+          )}
           {props.loading ? <div className="skeleton" aria-hidden="true"><i /><i /><i /></div> : null}
           {!props.loading && props.error && serverEvents.length === 0 ? (
             <div className="error-panel" role="alert">
@@ -1191,6 +1503,7 @@ export function CalendarShell(props: Props) {
               events={weekEvents}
               layoutEvents={baseEvents.filter((event) => weekKeys.includes(event.dayKey))}
               weekKeys={weekKeys}
+              timeZone={timeZone}
               width={Math.max(width, 320)}
               nowHour={weekKeys.includes(todayKey) ? nowHour : null}
               todayIndex={weekKeys.indexOf(todayKey)}
@@ -1210,8 +1523,13 @@ export function CalendarShell(props: Props) {
               }}
             />
           )}
+          {mode === "day" ? (
+            <NextDayRow nextKey={PlanTime.addDaysToKey(gridDayKey, 1)} onOpen={() => setAnchor(PlanTime.addDaysToKey(gridDayKey, 1))} />
+          ) : null}
+        </div>
         </div>
       </div>
+      )}
       {trayOpen ? <button type="button" className="tray-scrim" data-testid="tray-scrim" aria-label="Close tray" onClick={() => setTrayOpen(false)} /> : null}
       <div className="tray-sheet" data-open={trayOpen ? "1" : "0"} data-testid="tray-sheet" role="dialog" aria-label="Calendar tray" aria-hidden={trayOpen ? undefined : true}>
         <button type="button" className="tray-grip" data-testid="tray-sheet-grip" aria-label="Calendar tray" onPointerDown={onTrayPointer} />
@@ -1225,6 +1543,16 @@ export function CalendarShell(props: Props) {
           <p className="sub">{(props.meta?.sync_label || "").replaceAll("NOT synced", "Not synced")}</p>
         </div>
       </div>
+      {traySaveMessage ? (
+        <div className="tray-save-message" data-testid="tray-save-message" role="status">
+          <button type="button" data-testid="tray-save-message-text" className="tray-save-text">{traySaveMessage}</button>
+          {traySaveUndo ? (
+            <button type="button" onClick={() => { const run = traySaveUndo; setTraySaveUndo(null); setTraySaveMessage(null); void run(); }}>Undo</button>
+          ) : undo ? (
+            <button type="button" onClick={() => { const run = undo; setTraySaveMessage(null); setToast(null); setUndo(null); void run(); }}>Undo</button>
+          ) : null}
+        </div>
+      ) : null}
       <div className="v3-tray">
         <button type="button" className="tray-grip" data-testid="tray-grip" aria-label="Calendar tray" onPointerDown={onTrayPointer} />
         <button type="button" className="unscheduled" data-testid="unscheduled" onClick={() => setTrayOpen(true)}>
@@ -1259,6 +1587,36 @@ export function CalendarShell(props: Props) {
         <div className="view-menu" role="menu" aria-label="Calendar view">
           <button type="button" role="menuitem" onClick={() => { setMode("day"); setOverlay(null); }}>Day</button>
           <button type="button" role="menuitem" onClick={() => { setMode("week"); setOverlay(null); }}>Week</button>
+          <button type="button" role="menuitem" onClick={() => { setMode("month"); setMonthAnchor(anchor); setOverlay(null); }}>Month</button>
+        </div>
+      ) : null}
+      {overlay.kind === "jump" ? (
+        <div data-testid="jump-sheet" data-blocks-day-pager="1">
+          <MonthGridSheet
+            anchorDayKey={monthAnchor}
+            timeZone={timeZone}
+            selectedDayKey={anchor}
+            events={baseEvents.map((event) => ({ dayKey: event.dayKey, domain: event.domain }))}
+            detent="medium"
+            onSelectDate={(key) => {
+              if (overlay.kind === "jump" && overlay.moveEventId) {
+                const event = serverEvents.find((item) => item.id === overlay.moveEventId);
+                if (event) {
+                  const start = atHour(key, event.startHour, timeZone);
+                  const end = atHour(key, event.endHour, timeZone);
+                  if (start && end) void saveQuick(event, start, end);
+                }
+                setOverlay(null);
+                return;
+              }
+              setAnchor(key);
+              setOverlay(null);
+            }}
+            onOpenDay={(key) => { setAnchor(key); setMode("day"); setOverlay(null); }}
+            onPrevMonth={() => setMonthAnchor(PlanTime.addDaysToKey(monthAnchor, -28))}
+            onNextMonth={() => setMonthAnchor(PlanTime.addDaysToKey(monthAnchor, 28))}
+            onToday={() => { const key = todayKey; setAnchor(key); setOverlay(null); }}
+          />
         </div>
       ) : null}
       {overlay.kind === "menu" ? (
@@ -1288,6 +1646,10 @@ export function CalendarShell(props: Props) {
             void retryRefused(event.outboxId, event.title, event.start, event.end, unplacedToast(event.title), event.id);
           }}
           onTime={() => pushToast("Drag the block to change the time.")}
+          onDatePick={() => {
+            setMonthAnchor(anchor);
+            setOverlay({ kind: "jump", moveEventId: overlay.id });
+          }}
         />
       ) : null}
       {overlay.kind === "review" ? (
@@ -1334,26 +1696,35 @@ function previewFrom(
   grid: HTMLDivElement | null,
   width: number,
   previousSnap: number | null,
+  displayDayKey: string,
+  timeZone: string,
+  crossPeeking: boolean,
 ): Preview | null {
   if (gesture.phase !== "lifted" || !origin || !grid) return null;
   const rect = grid.getBoundingClientRect();
+  const dayKey = mode === "day" ? (crossPeeking ? displayDayKey : origin.dayKey) : origin.dayKey;
+  const scrollTop = grid.scrollTop;
+  const originY = gesture.origin.y - rect.top + scrollTop;
+  const pointY = gesture.point.y - rect.top + scrollTop;
   const moved = moveByPointer({
     originStart: origin.startHour,
     originDay: Math.max(0, origin.dayIndex),
     duration: origin.duration,
-    deltaY: gesture.point.y - gesture.origin.y,
+    deltaY: pointY - originY,
     pointerX: gesture.point.x - rect.left,
     pxPerHour: mode === "day" ? DAY_PX : WEEK_PX,
     gutter: mode === "day" ? DAY_GUTTER : WEEK_GUTTER,
     columnWidth: mode === "day" ? width : weekColumnWidth(width),
     allowDayChange: mode === "week",
     previousSnap,
+    dayKey,
+    timeZone,
   });
   if (Math.hypot(gesture.point.x - gesture.origin.x, gesture.point.y - gesture.origin.y) < COMMIT_PX) return null;
   return {
     id: origin.id,
     dayIndex: moved.day,
-    dayKey: mode === "week" ? PlanTime.addDaysToKey(monday, moved.day) : origin.dayKey,
+    dayKey: mode === "week" ? PlanTime.addDaysToKey(monday, moved.day) : dayKey,
     startHour: moved.start,
   };
 }
@@ -1552,20 +1923,10 @@ function DayCanvas(props: {
   const boxes = dayBoxes(timed, props.width);
   const taps = dayTaps(timed, props.width);
   const markY = props.drag ? dayY(props.drag.startHour) : null;
-  const hours = [];
-  for (let hour = 9; hour <= 18; hour += 1) hours.push(hour);
   return (
     <>
       <div className="workband" style={{ left: DAY_GUTTER, top: dayY(9), right: 0, height: dayY(17) - dayY(9) }} />
       <div className="work-end" style={{ top: dayY(17) - 4 }}>Work hours end</div>
-      {hours.map((hour) => (
-        <div key={hour}>
-          <div className="hour-line" style={{ top: dayY(hour) }} />
-          {nearMark(markY, dayY(hour), 15) ? null : (
-            <div className="hour-label" style={{ top: dayY(hour), right: props.width - DAY_GUTTER + 8 }}>{clock(hour)}</div>
-          )}
-        </div>
-      ))}
       {props.drag ? <div className="ghost" style={ghostStyle(boxes.find((box) => box.id === props.drag?.id))} /> : null}
       {props.events.map((event) => {
         const box = boxes.find((item) => item.id === event.id);
@@ -1596,7 +1957,7 @@ function DayCanvas(props: {
         );
       })}
       {props.nowHour != null ? <NowMark hour={props.nowHour} left={DAY_GUTTER} width={props.width - DAY_GUTTER} hidePill={hideNowPill(markY, dayY(props.nowHour), 11, 8)} /> : null}
-      {props.drag ? <DayPill hour={props.drag.startHour} blockX={boxes.find((box) => box.id === props.drag?.id)?.x ?? DAY_GUTTER} /> : null}
+      {props.drag ? <DayPill hour={props.drag.startHour} blockX={boxes.find((box) => box.id === props.drag?.id)?.x ?? DAY_GUTTER} data-testid="gutter-drag-pill" /> : null}
     </>
   );
 }
@@ -1611,14 +1972,14 @@ function ghostStyle(box: { x: number; y: number; w: number; h: number } | undefi
   return { left: box.x, top: box.y, width: box.w, height: box.h };
 }
 
-function DayPill({ hour, blockX }: { hour: number; blockX: number }) {
+function DayPill({ hour, blockX, "data-testid": testId }: { hour: number; blockX: number; "data-testid"?: string }) {
   const y = dayY(hour);
   const width = 52;
   const x = DAY_GUTTER - 6 - width;
   return (
     <>
       <div className="leader" style={{ left: DAY_GUTTER - 6, width: Math.max(0, blockX - DAY_GUTTER + 4), top: y }} />
-      <div className="gutter-pill" style={{ left: x, top: y - 11, width, height: 22 }}>{gutterClock(hour)}</div>
+      <div className="gutter-pill" data-testid={testId} style={{ left: x, top: y - 11, width, height: 22 }}>{gutterClock(hour)}</div>
     </>
   );
 }
@@ -1702,6 +2063,7 @@ function WeekCanvas(props: {
   events: CalEvent[];
   layoutEvents: CalEvent[];
   weekKeys: string[];
+  timeZone: string;
   width: number;
   nowHour: number | null;
   todayIndex: number;
@@ -1733,13 +2095,15 @@ function WeekCanvas(props: {
       {[0, 1, 2, 3, 4].map((day) => (
         <div key={day} className="workband" style={{ left: WEEK_GUTTER + day * colW, top: weekY(9), width: colW, height: weekY(17) - weekY(9) }} />
       ))}
-      {Array.from({ length: 13 }, (_, index) => WEEK_ORIGIN + index).map((hour) => (
-        <div key={hour}>
-          <div className="hour-line" style={{ top: weekY(hour) }} />
-          {hour < 20 && !nearMark(markY, weekY(hour), 12) ? (
-            <div className="hour-label" style={{ top: weekY(hour), left: 0, width: WEEK_GUTTER, textAlign: "right", paddingRight: 4 }}>{clock(hour)}</div>
-          ) : null}
-        </div>
+      {props.weekKeys.map((key, day) => (
+        <div
+          key={key}
+          className="week-column"
+          data-testid={`week-column-${dayName(key).toLowerCase()}`}
+          data-scroll-synced="1"
+          data-dst-hours={String(PlanTime.dayMinutes(key, props.timeZone) / 60)}
+          style={{ position: "absolute", left: WEEK_GUTTER + day * colW, top: 0, width: colW, height: "100%", pointerEvents: "none" }}
+        />
       ))}
       {props.drag ? <div className="ghost" style={ghostStyle(boxes.find((box) => box.id === props.drag?.id))} /> : null}
       {props.events.map((event) => {
@@ -1910,11 +2274,12 @@ function EventSheet(props: {
   onDecide: (event: CalEvent, action: "approve" | "deny") => void;
   onRetry: (event: CalEvent) => void;
   onTime: () => void;
+  onDatePick: () => void;
 }) {
   const event = props.event;
   if (!event) return null;
   return (
-    <div className="sheet" role="dialog" aria-label={event.title}>
+    <div className="sheet" role="dialog" aria-label={event.title} data-testid="details-sheet">
       <div className="sheet-grip" />
       <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
         <h2>{event.title}</h2>
@@ -1923,9 +2288,12 @@ function EventSheet(props: {
         ) : null}
       </div>
       <p className="sub">{event.state === "unplaced" ? "Not on calendar" : event.state === "proposed" ? `Agent suggestion · ${domainLabel(event.domain)}` : domainLabel(event.domain)}</p>
-      <button type="button" className="time-row" onClick={props.onTime}>
+      <button type="button" className="time-row" data-testid="details-date-row" onClick={props.onDatePick}>
         <span>{dayTitle(event.dayKey)}</span>
         <span>{rangeLabel(event.startHour, event.endHour)} ›</span>
+      </button>
+      <button type="button" className="time-row quiet" data-testid="details-time-row" onClick={props.onTime}>
+        Change time
       </button>
       {event.explanation ? <p className="why">Why: {event.explanation}</p> : null}
       {event.state === "unplaced" ? (

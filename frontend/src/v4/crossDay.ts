@@ -78,7 +78,7 @@ export function crossDayStripEnter(state: CrossDayState): CrossDayState {
 
 export function crossDayStripLeave(state: CrossDayState): CrossDayState {
   if (state.phase !== "carrying") return state;
-  return { ...state, onStrip: true, hoverDayKey: null, dwellMs: 0 };
+  return { ...state, onStrip: false, hoverDayKey: null, dwellMs: 0 };
 }
 
 export function crossDayHoverCell(state: CrossDayState, dayKey: string): CrossDayState {
