@@ -144,3 +144,23 @@ export function dwellProgress(state: CrossDayState): number {
   if (!state.hoverDayKey || state.dwellMs <= 0) return 0;
   return Math.min(1, state.dwellMs / CROSS_DAY_DWELL_MS);
 }
+
+export function crossDaySurfaceAt(clientX: number, clientY: number): CrossDaySurface {
+  const msg = document.querySelector('[data-testid="tray-save-message"]');
+  if (msg instanceof HTMLElement) {
+    const box = msg.getBoundingClientRect();
+    if (clientX >= box.left && clientX <= box.right && clientY >= box.top && clientY <= box.bottom) return "message";
+  }
+  const strip = document.querySelector('[data-testid="day-strip"]');
+  if (strip instanceof HTMLElement) {
+    const box = strip.getBoundingClientRect();
+    if (clientY >= box.top && clientY <= box.bottom && clientX >= box.left && clientX <= box.right) return "strip";
+  }
+  for (const sel of [".tray-save-message", ".v3-tray", ".tray-sheet"]) {
+    const node = document.querySelector(sel);
+    if (!(node instanceof HTMLElement)) continue;
+    const box = node.getBoundingClientRect();
+    if (clientX >= box.left && clientX <= box.right && clientY >= box.top && clientY <= box.bottom) return "tray";
+  }
+  return "grid";
+}

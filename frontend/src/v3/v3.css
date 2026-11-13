@@ -865,6 +865,12 @@ body { margin: 0; background: #0a0b0d; }
 .next-day-row { position: absolute; left: 56px; right: 10px; bottom: 0; height: 44px; display: flex; align-items: center; justify-content: center; border-top: 1px solid var(--line); }
 .next-day-row button { height: 44px; color: var(--t2); font-size: 13px; }
 .day-pager { will-change: transform; }
+.day-pager[data-transition="cross-fade"] { transition: opacity 150ms ease-in-out; }
+.hour-row { pointer-events: none; overflow: visible; }
+.week-hour-axis { position: absolute; left: 0; top: 0; width: 36px; z-index: 2; }
+.all-day-row { position: absolute; left: 56px; right: 10px; top: 0; display: flex; flex-wrap: wrap; gap: 6px; padding: 4px 0 8px; z-index: 3; border-bottom: 1px solid var(--line); }
+.all-day-chip { min-height: 28px; padding: 4px 10px; border-radius: 8px; font-size: 12px; background: color-mix(in srgb, var(--work) 16%, transparent); }
+.block[data-highlight="cross-day"] .face { box-shadow: 0 0 0 2px color-mix(in srgb, var(--amber) 55%, transparent); }
 .tray-save-message { position: absolute; left: 16px; right: 16px; bottom: calc(56px + env(safe-area-inset-bottom)); display: flex; align-items: center; gap: 8px; min-height: 48px; padding: 0 12px; border-radius: 24px; background: var(--pill); z-index: 5; }
 .tray-save-text { flex: 1; text-align: left; min-height: 44px; font-size: 13px; }
 .v3-month { flex: 1; min-height: 0; overflow: auto; padding: 8px 12px; }

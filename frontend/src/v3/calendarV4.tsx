@@ -1,7 +1,7 @@
 /** v4 slice 1 wiring helpers used by CalendarShell. */
 
 import { useCallback, useEffect, useRef, useState, type RefObject } from "react";
-import { PX_PER_MINUTE } from "../plan/time";
+import { PX_PER_MINUTE, PlanTime } from "../plan/time";
 import { dayHourRows, minutesToY, weekHourRows, type DayHourRow } from "../v4/dayRange";
 import { panDown, panMove, swipeShouldCommit, type PanGesture, type PanKind } from "../v4/swipe";
 import { dayName, dayTitle } from "./format";
@@ -141,17 +141,26 @@ export function HourRows(props: {
               : index === props.rows.length - 1
                 ? "hour-row-last"
                 : `hour-row-${row.hour}`;
+        const height = row.spanMinutes * PX_PER_MINUTE;
         return (
-          <div key={`${row.index}-${row.startMinutes}`} data-testid={testId} data-hour={String(row.hour)} data-repeated={row.repeated ? "1" : "0"} data-skipped={row.skipped ? "1" : "0"}>
+          <div
+            key={`${row.index}-${row.startMinutes}`}
+            className="hour-row"
+            data-testid={testId}
+            data-hour={String(row.hour)}
+            data-repeated={row.repeated ? "1" : "0"}
+            data-skipped={row.skipped ? "1" : "0"}
+            style={{ position: "absolute", left: 0, right: 0, top, height }}
+          >
             {!row.skipped ? (
               <>
-                <div className="hour-line" style={{ top }} />
+                <div className="hour-line" style={{ top: 0 }} />
                 <div
                   className="hour-label"
                   style={
                     props.mode === "week"
-                      ? { top, left: 0, width: gutter, textAlign: "right", paddingRight: 4 }
-                      : { top, right: props.width - gutter + 8 }
+                      ? { top: 0, left: 0, width: gutter, textAlign: "right", paddingRight: 4 }
+                      : { top: 0, right: props.width - gutter + 8 }
                   }
                 >
                   {row.label}
@@ -171,6 +180,15 @@ export function dayRowsFor(dayKey: string, timeZone: string): DayHourRow[] {
 
 export function weekRowsFor(mondayKey: string, timeZone: string): DayHourRow[] {
   return weekHourRows(mondayKey, timeZone);
+}
+
+/** Longest day in the visible week (DST fall-back → 25h). */
+export function weekHourCount(weekKeys: string[], timeZone: string): number {
+  return Math.max(...weekKeys.map((key) => dayHourRows(key, timeZone).length));
+}
+
+export function weekGridHeightPx(weekKeys: string[], timeZone: string): number {
+  return Math.max(...weekKeys.map((key) => PlanTime.dayHeightPx(key, timeZone)));
 }
 
 export function NextDayRow(props: { nextKey: string; onOpen: () => void }) {
