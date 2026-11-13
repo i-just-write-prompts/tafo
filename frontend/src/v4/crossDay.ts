@@ -88,18 +88,20 @@ export function crossDayHoverCell(state: CrossDayState, dayKey: string): CrossDa
 }
 
 export function crossDayTick(state: CrossDayState, elapsedMs: number): CrossDayState {
-  if (state.phase !== "carrying" || !state.onStrip || !state.hoverDayKey) return state;
-  const target = state.hoverDayKey;
-  if (target === state.originDayKey && state.viewDayKey === state.originDayKey) {
-    return { ...state, dwellMs: 0 };
+  if (state.phase !== "carrying" || !state.hoverDayKey) return state;
+  const active = state.onStrip ? state : crossDayStripEnter(state);
+  const target = active.hoverDayKey;
+  if (!target) return active;
+  if (target === active.originDayKey && active.viewDayKey === active.originDayKey) {
+    return { ...active, dwellMs: 0 };
   }
-  const dwellMs = Math.min(CROSS_DAY_DWELL_MS, state.dwellMs + elapsedMs);
+  const dwellMs = Math.min(CROSS_DAY_DWELL_MS, active.dwellMs + elapsedMs);
   const peeked = dwellMs >= CROSS_DAY_DWELL_MS;
   return {
-    ...state,
+    ...active,
     dwellMs,
-    peeked: state.peeked || peeked,
-    viewDayKey: peeked ? target : state.viewDayKey,
+    peeked: active.peeked || peeked,
+    viewDayKey: peeked ? target : active.viewDayKey,
   };
 }
 

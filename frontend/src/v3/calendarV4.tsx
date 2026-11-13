@@ -219,8 +219,8 @@ export function CrossDayBanner(props: { originDayKey: string; viewDayKey: string
 }
 
 export function DwellRing(props: { progress: number }) {
-  if (props.progress <= 0) return null;
-  return <span className="strip-dwell-ring" data-testid="strip-dwell-ring" data-progress={String(props.progress)} />;
+  const progress = Math.max(0, Math.min(1, props.progress));
+  return <span className="strip-dwell-ring" data-testid="strip-dwell-ring" data-progress={String(progress)} />;
 }
 
 export function ReentryHint(props: { show: boolean; originDayKey: string }) {

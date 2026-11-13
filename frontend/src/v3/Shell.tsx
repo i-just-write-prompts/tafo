@@ -252,6 +252,7 @@ export function CalendarShell(props: Props) {
   const [crossHighlightId, setCrossHighlightId] = useState<string | null>(null);
   const reducedMotion = typeof window !== "undefined" && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
   const autoScrollRef = useRef<{ zone: "top" | "bottom" | null; since: number }>({ zone: null, since: 0 });
+  const stripDwellTimerRef = useRef(0);
   const [weekStripOffset, setWeekStripOffset] = useState(0);
   const [nowOffscreen, setNowOffscreen] = useState(false);
   const scrollHour = useScrollHour(gridRef);
@@ -403,18 +404,35 @@ export function CalendarShell(props: Props) {
   }, [gesture.phase, mode, gesture.phase === "lifted" && gesture.phase === "lifted" ? gesture.eventId : ""]);
 
   useEffect(() => {
-    if (crossDay.phase !== "carrying" || !crossDay.onStrip || !crossDay.hoverDayKey) return undefined;
-    let frame = 0;
-    let last = performance.now();
-    const loop = () => {
-      const t = performance.now();
-      setCrossDay((state) => crossDayTick(state, t - last));
-      last = t;
-      frame = requestAnimationFrame(loop);
-    };
-    frame = requestAnimationFrame(loop);
-    return () => cancelAnimationFrame(frame);
+    if (crossDay.phase !== "carrying" || !crossDay.hoverDayKey) return undefined;
+    const timer = window.setInterval(() => {
+      setCrossDay((state) => crossDayTick(state, 20));
+    }, 20);
+    return () => window.clearInterval(timer);
   }, [crossDay.phase, crossDay.onStrip, crossDay.hoverDayKey]);
+
+  useEffect(() => {
+    if (crossDay.phase !== "carrying" || !crossDay.peeked) return undefined;
+    const onMove = (clientX: number, clientY: number, pointerId: number, pointerType: string) => {
+      if (gestureRef.current.phase !== "idle") return;
+      if (crossDaySurfaceAt(clientX, clientY) !== "grid") return;
+      resumeCrossDayPointerDrag({ pointerId, clientX, clientY, pointerType });
+    };
+    const onPointerMove = (native: PointerEvent) => {
+      onMove(native.clientX, native.clientY, native.pointerId, native.pointerType);
+    };
+    const onTouchMove = (native: TouchEvent) => {
+      const touch = native.changedTouches[0] ?? native.touches[0];
+      if (!touch) return;
+      onMove(touch.clientX, touch.clientY, 1, "touch");
+    };
+    window.addEventListener("pointermove", onPointerMove, true);
+    window.addEventListener("touchmove", onTouchMove, { capture: true, passive: true });
+    return () => {
+      window.removeEventListener("pointermove", onPointerMove, true);
+      window.removeEventListener("touchmove", onTouchMove, true);
+    };
+  }, [crossDay.phase, crossDay.peeked, crossDay.eventId]);
 
   useEffect(() => {
     const grid = gridRef.current;
@@ -647,6 +665,46 @@ export function CalendarShell(props: Props) {
     setAnchor(originDayKey);
     const grid = gridRef.current;
     if (grid) grid.scrollTop = scrollMinutes * PX_PER_MINUTE;
+  }
+
+  function stopStripDwell() {
+    if (stripDwellTimerRef.current) window.clearInterval(stripDwellTimerRef.current);
+    stripDwellTimerRef.current = 0;
+  }
+
+  function beginStripDwell(dayKey: string) {
+    if (crossDayRef.current.phase !== "carrying") return;
+    flushSync(() => {
+      setCrossDay((state) => crossDayHoverCell(state.onStrip ? state : crossDayStripEnter(state), dayKey));
+    });
+    stopStripDwell();
+    stripDwellTimerRef.current = window.setInterval(() => {
+      setCrossDay((state) => crossDayTick(state, 20));
+    }, 20);
+  }
+
+  function stripDwellTargetFromPoint(clientX: number, clientY: number): string | null {
+    const el = document.elementFromPoint(clientX, clientY);
+  if (!(el instanceof Element)) return null;
+    const cell = el.closest("[data-strip-key]");
+    if (!(cell instanceof HTMLElement)) return null;
+    return cell.getAttribute("data-strip-key");
+  }
+
+  function resumeCrossDayPointerDrag(pointer: { pointerId: number; clientX: number; clientY: number; pointerType: string }): boolean {
+    const state = crossDayRef.current;
+    if (state.phase !== "carrying" || !state.peeked || gestureRef.current.phase !== "idle") return false;
+    const event =
+      baseEvents.find((item) => item.id === state.eventId)
+      ?? serverEvents.find((item) => item.id === state.eventId);
+    if (!event) return false;
+    startGesture(event, pointer);
+    const current = gestureRef.current as Gesture;
+    if (current.phase !== "pending") return false;
+    const lifted = { ...current, phase: "lifted" as const, point: { x: pointer.clientX, y: pointer.clientY } };
+    gestureRef.current = lifted;
+    flushSync(() => setGesture(lifted));
+    return true;
   }
 
   async function saveQuick(
@@ -989,13 +1047,17 @@ export function CalendarShell(props: Props) {
         flushSync(() => setGesture(updated));
         return;
       }
+      if (updated.phase === "lifted" && current.phase !== "lifted" && mode === "day" && originRef.current) {
+        const grid = gridRef.current;
+        setCrossDay(crossDayLift(originRef.current.id, originRef.current.dayKey, (grid?.scrollTop ?? 0) / PX_PER_MINUTE));
+      }
       if (updated.phase === "lifted" && mode === "day") {
         const stripEl = document.querySelector('[data-testid="day-strip"]');
         if (stripEl instanceof HTMLElement) {
           const rect = stripEl.getBoundingClientRect();
           if (native.clientY >= rect.top && native.clientY <= rect.bottom) {
             setCrossDay((state) => {
-              let next = state.phase === "carrying" && !state.onStrip ? crossDayStripEnter(state) : state;
+              let next = state.phase === "carrying" ? crossDayStripEnter(state) : state;
               for (const key of weekKeys) {
                 const cell = stripEl.querySelector<HTMLElement>(`[data-strip-key="${key}"]`);
                 if (!cell) continue;
@@ -1077,6 +1139,12 @@ export function CalendarShell(props: Props) {
           setOverlay({ kind: "event", id: eventId });
         }, 80);
       }
+      if (released.phase === "lifted" && carryingUp.phase === "carrying" && surface === "strip") {
+        setCrossDay((state) => (state.phase === "carrying" ? crossDayStripEnter(state) : state));
+        gestureRef.current = { phase: "idle" };
+        setGesture({ phase: "idle" });
+        return;
+      }
       if (released.phase === "lifted" && carryingUp.phase === "carrying" && (surface !== "grid" || !result.commit)) {
         finishGesture(released, surface);
         gestureRef.current = { phase: "idle" };
@@ -1104,6 +1172,9 @@ export function CalendarShell(props: Props) {
 
   function onGridPointerDown(pointer: React.PointerEvent<HTMLDivElement>) {
     if (pointer.button !== 0) return;
+    if (crossDayRef.current.phase === "carrying" && crossDayRef.current.peeked) {
+      if (resumeCrossDayPointerDrag(pointer)) return;
+    }
   const hit = blockUnder(pointer.clientX, pointer.clientY);
     if (hit) {
       if (traySaveMessage) {
@@ -1460,7 +1531,7 @@ export function CalendarShell(props: Props) {
           <button type="button" className="title-jump" data-testid="day-title-jump" onClick={() => { setMonthAnchor(anchor); setOverlay({ kind: "jump" }); }}>
             <h1>{mode === "month" ? dayTitle(monthAnchor).replace(/,.*/, "") : mode === "day" ? dayTitle(gridDayKey) : weekTitle(monday)}</h1>
           </button>
-          {crossDay.phase === "carrying" ? (
+          {crossDay.phase === "carrying" || gesture.phase === "lifted" ? (
             <span className="cross-day-chip" data-testid="cross-day-chip">{dayTitle(gridDayKey)}</span>
           ) : null}
           <CrossDayBanner originDayKey={crossDay.originDayKey || anchor} viewDayKey={crossDay.viewDayKey || gridDayKey} />
@@ -1478,7 +1549,34 @@ export function CalendarShell(props: Props) {
         </header>
       )}
       {mode === "day" ? (
-        <div className="v3-dow" role="radiogroup" aria-label="Days" data-testid="day-strip" data-blocks-day-pager={overlay != null ? "1" : "0"}>
+        <div
+          className="v3-dow"
+          role="radiogroup"
+          aria-label="Days"
+          data-testid="day-strip"
+          data-blocks-day-pager={overlay != null ? "1" : "0"}
+          onPointerDownCapture={(event) => {
+            if (event.button !== 0) return;
+            const dayKey = stripDwellTargetFromPoint(event.clientX, event.clientY);
+            if (dayKey) beginStripDwell(dayKey);
+          }}
+          onPointerUpCapture={(event) => {
+            if (event.pointerType === "touch") return;
+            stopStripDwell();
+          }}
+          onPointerCancelCapture={(event) => {
+            if (event.pointerType === "touch") return;
+            stopStripDwell();
+          }}
+          onTouchStartCapture={(event) => {
+            const touch = event.changedTouches[0];
+            if (!touch) return;
+            const dayKey = stripDwellTargetFromPoint(touch.clientX, touch.clientY);
+            if (dayKey) beginStripDwell(dayKey);
+          }}
+          onTouchEndCapture={() => stopStripDwell()}
+          onTouchCancelCapture={() => stopStripDwell()}
+        >
           {weekKeys.map((key) => {
             const proposed = serverEvents.some((event) => event.dayKey === key && event.state === "proposed");
             const selected = key === stripSelection;
@@ -1497,7 +1595,13 @@ export function CalendarShell(props: Props) {
                 data-strip-key={key}
                 data-today={today ? "1" : "0"}
                 data-has-proposals={proposed ? "1" : "0"}
-                onClick={() => setAnchor(key)}
+                onClick={(click) => {
+                  if (crossDay.phase === "carrying") {
+                    click.preventDefault();
+                    return;
+                  }
+                  setAnchor(key);
+                }}
                 onPointerEnter={() => {
                   if (crossDay.phase === "carrying" && crossDay.onStrip) setCrossDay((s) => crossDayHoverCell(s, key));
                 }}
