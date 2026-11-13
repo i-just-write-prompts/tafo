@@ -1,0 +1,85 @@
+TAFO frontend reachability
+Base: main @ d6d0ae4 (post PR #5)
+Regenerated after merging main into cursor/calendar-client-dead-ui-487d before deleting unreachable UI.
+
+Decision
+Delete a production file only when the TypeScript graph from main.tsx, the e2e graph, the vitest helper graph, the CSS/asset scan, and the Vite bundle all miss it.
+- 18 source files from the review remain unreachable on current main. Deleted, with the tests that import them.
+- frontend/src/styles.css is also unreachable (no JS import, not linked from index.html, no url() points at it). Deleted with the old UI. 448 lines.
+- Kept, even though the Vite bundle drops them: frontend/src/types.ts and frontend/src/plan/store.tsx. Both are type-only imports from modules main.tsx reaches (planMachine.ts imports DragState from store.tsx). Removing them breaks the typecheck.
+- Kept because main.tsx reaches them: api.ts, calendar/client.ts, plan/planMachine.ts, plan/selectors.ts, plan/time.ts, rev.ts, and the v3 modules. frontend/src/plan/actions.ts was reachable before the CalendarClient refactor; it is deleted now that Shell and App route calendar reads and saves through calendar/client.ts.
+- e2e specs and helpers import nothing under frontend/src.
+
+Tools
+- TypeScript preProcessFile + resolveModuleName (follows import, export-from, import type, and dynamic import).
+- Vite production build module graph (production build after deletions: 43 Rollup modules under src).
+- CSS url()/@import scan and index.html src/href scan.
+- e2e specs and helpers, and vitest config/helpers, resolved the same way.
+
+Roots
+- App: frontend/src/main.tsx
+- e2e: frontend/e2e/helpers/saveClaim.ts, frontend/e2e/plan.spec.ts, frontend/e2e/support.ts, frontend/e2e/statechart-repro.spec.ts, frontend/e2e/write-failure.spec.ts
+- vitest setupFiles matches: (none — vitest.config.ts has no setupFiles)
+- vitest helper files under src: (none)
+
+index.html references
+- /favicon.svg
+- /src/main.tsx
+
+CSS url() and @import
+- frontend/src/v3/v3.css -> /fonts/Inter-Regular.ttf
+- frontend/src/v3/v3.css -> /fonts/Inter-Medium.ttf
+- frontend/src/v3/v3.css -> /fonts/Inter-SemiBold.ttf
+- frontend/src/v3/v3.css -> /fonts/Inter-Bold.ttf
+
+Reachable from main.tsx (TypeScript graph, including type-only imports and CSS specifiers that resolve on disk)
+- frontend/src/App.tsx
+- frontend/src/api.ts
+- frontend/src/calendar/client.ts
+- frontend/src/main.tsx
+- frontend/src/plan/planMachine.ts
+- frontend/src/plan/selectors.ts
+- frontend/src/plan/store.tsx
+- frontend/src/plan/time.ts
+- frontend/src/rev.ts
+- frontend/src/types.ts
+- frontend/src/v3/Shell.tsx
+- frontend/src/v3/format.ts
+- frontend/src/v3/geometry.ts
+- frontend/src/v3/gesture.ts
+- frontend/src/v3/icons.tsx
+- frontend/src/v3/model.ts
+- frontend/src/v3/session.ts
+- frontend/src/v3/titles.ts
+- frontend/src/v3/undo.ts
+- frontend/src/v3/v3.css
+
+Production source files NOT reachable from main.tsx, e2e, vitest helpers, or the Vite bundle
+- frontend/src/components/CalendarPanel.tsx
+- frontend/src/components/DeleteControl.tsx
+- frontend/src/components/Inbox.tsx
+- frontend/src/components/TaskBoard.tsx
+- frontend/src/components/WeekPanel.tsx
+- frontend/src/plan/Block.tsx
+- frontend/src/plan/BlockPopover.tsx
+- frontend/src/plan/CalendarGrid.tsx
+- frontend/src/plan/DayColumn.tsx
+- frontend/src/plan/PlanView.tsx
+- frontend/src/plan/ProposedBlock.tsx
+- frontend/src/plan/SettingsStub.tsx
+- frontend/src/plan/Toolbar.tsx
+- frontend/src/plan/UnscheduledSidebar.tsx
+- frontend/src/plan/gestures.ts
+- frontend/src/plan/keys.ts
+- frontend/src/plan/layout.ts
+- frontend/src/plan/sync.ts
+- frontend/src/styles.css
+
+Tests removed (only covered deleted production files)
+- frontend/src/components/delete-controls.test.tsx
+- frontend/src/plan/keys.test.ts
+- frontend/src/plan/layout.test.ts
+- frontend/src/plan/sync.test.ts
+
+Unreachable production files: 19 (18 review files + styles.css)
+Deleted tests: 4 files (8 vitest cases)
