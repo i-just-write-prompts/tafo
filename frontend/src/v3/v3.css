@@ -877,6 +877,9 @@ body { margin: 0; background: #0a0b0d; }
 .month-grid-cell[data-today="1"]:not([data-selected="1"]) { box-shadow: inset 0 0 0 1px var(--t2); }
 .month-grid-dots { display: flex; gap: 3px; justify-content: center; margin-top: 2px; }
 .month-grid-dot { width: 5px; height: 5px; border-radius: 50%; }
+.autoscroll-zone-top { position: absolute; left: 0; right: 0; top: 156px; height: 48px; z-index: 2; pointer-events: none; }
+.autoscroll-zone-bottom { position: absolute; left: 0; right: 0; bottom: 140px; height: 56px; z-index: 2; pointer-events: none; }
+.cross-day-target-dot { position: absolute; top: 132px; right: 12px; width: 8px; height: 8px; border-radius: 4px; background: var(--amber); z-index: 4; }
 
 @media (prefers-reduced-motion: reduce) {
   .v3 *, .v3 *::before, .v3 *::after {

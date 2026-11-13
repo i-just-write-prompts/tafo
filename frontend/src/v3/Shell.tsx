@@ -31,7 +31,6 @@ import {
   dayTaps,
   dayY,
   moveByPointer,
-  nearMark,
   paintedWeekSpan,
   weekBoxes,
   weekColumnWidth,
@@ -242,6 +241,7 @@ export function CalendarShell(props: Props) {
   const crossDayRef = useRef(crossDay);
   crossDayRef.current = crossDay;
   const [traySaveMessage, setTraySaveMessage] = useState<string | null>(null);
+  const [trayTargetDay, setTrayTargetDay] = useState<string | null>(null);
   const [traySaveUndo, setTraySaveUndo] = useState<(() => Promise<void>) | null>(null);
   const [weekStripOffset, setWeekStripOffset] = useState(0);
   const [nowOffscreen, setNowOffscreen] = useState(false);
@@ -674,6 +674,7 @@ export function CalendarShell(props: Props) {
           ? crossDayMoveLabel(event.title, moved.dayKey, hour)
           : quickToast(event.title, hour);
         setTraySaveMessage(trayLine);
+        if (moved.dayKey !== event.dayKey) setTrayTargetDay(moved.dayKey);
         pushToast(trayLine);
       } else {
         const block = propsRef.current.blocks.find((item) => item.id === event.id);
@@ -708,6 +709,7 @@ export function CalendarShell(props: Props) {
           ? crossDayMoveLabel(event.title, moved.dayKey, hour)
           : quickToast(event.title, hour);
         setTraySaveMessage(message);
+        if (moved.dayKey !== event.dayKey) setTrayTargetDay(moved.dayKey);
         const nextBlock = saved.block;
         const undoFn = nextBlock ? async () => {
           await calendar.undo({
@@ -991,7 +993,10 @@ export function CalendarShell(props: Props) {
     if (pointer.button !== 0) return;
   const hit = blockUnder(pointer.clientX, pointer.clientY);
     if (hit) {
-      if (traySaveMessage) setTraySaveMessage(null);
+      if (traySaveMessage) {
+        setTraySaveMessage(null);
+        setTrayTargetDay(null);
+      }
       startGesture(hit, pointer);
       return;
     }
@@ -1315,6 +1320,9 @@ export function CalendarShell(props: Props) {
           <button type="button" className="title-jump" data-testid="day-title-jump" onClick={() => { setMonthAnchor(anchor); setOverlay({ kind: "jump" }); }}>
             <h1>{mode === "month" ? dayTitle(monthAnchor).replace(/,.*/, "") : mode === "day" ? dayTitle(gridDayKey) : weekTitle(monday)}</h1>
           </button>
+          {crossDay.phase === "carrying" ? (
+            <span className="cross-day-chip" data-testid="cross-day-chip">{dayTitle(gridDayKey)}</span>
+          ) : null}
           <CrossDayBanner originDayKey={crossDay.originDayKey || anchor} viewDayKey={crossDay.viewDayKey || gridDayKey} />
           <ReentryHint show={crossDay.phase === "carrying" && crossDay.hoverDayKey === crossDay.originDayKey && crossDay.onStrip} originDayKey={crossDay.originDayKey || anchor} />
           <button type="button" className="a11y-nav" data-testid="a11y-next-day" aria-label="Next day" onClick={() => setAnchor(PlanTime.addDaysToKey(anchor, 1))}>›</button>
@@ -1420,6 +1428,13 @@ export function CalendarShell(props: Props) {
           />
         </div>
       ) : (
+      <>
+      {mode === "day" ? (
+        <>
+          <div className="autoscroll-zone-top" data-testid="autoscroll-zone-top" aria-hidden />
+          <div className="autoscroll-zone-bottom" data-testid="autoscroll-zone-bottom" data-above-tray={traySaveMessage ? "1" : "0"} aria-hidden />
+        </>
+      ) : null}
       <div
         className="v3-grid"
         ref={gridRef}
@@ -1529,7 +1544,11 @@ export function CalendarShell(props: Props) {
         </div>
         </div>
       </div>
+      </>
       )}
+      {trayTargetDay ? (
+        <i className="cross-day-target-dot" data-testid={`cross-day-target-dot-${dayName(trayTargetDay).toLowerCase()}`} aria-hidden />
+      ) : null}
       {trayOpen ? <button type="button" className="tray-scrim" data-testid="tray-scrim" aria-label="Close tray" onClick={() => setTrayOpen(false)} /> : null}
       <div className="tray-sheet" data-open={trayOpen ? "1" : "0"} data-testid="tray-sheet" role="dialog" aria-label="Calendar tray" aria-hidden={trayOpen ? undefined : true}>
         <button type="button" className="tray-grip" data-testid="tray-sheet-grip" aria-label="Calendar tray" onPointerDown={onTrayPointer} />
