@@ -50,6 +50,11 @@ export interface Meta {
   human_edits_auto_approve?: boolean;
   preview?: boolean;
   preview_banner?: string;
+  features?: {
+    slice2?: boolean;
+    feedback_configured?: boolean;
+    feedback_screenshot_default?: boolean;
+  };
 }
 
 export interface BusyInterval {

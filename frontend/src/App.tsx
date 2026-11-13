@@ -3,6 +3,8 @@ import { OFFLINE_MESSAGE, api } from "./api";
 import { ENTIRE_CALENDAR, calendar } from "./calendar/client";
 import { CalendarShell } from "./v3/Shell";
 import type { CalendarBlock, Meta, OutboxOperation, Proposal, Task } from "./types";
+import type { HoursPayload } from "./v4/hoursTypes";
+import { slice2Enabled } from "./v4/slice2";
 
 export function App() {
   const [meta, setMeta] = useState<Meta | null>(null);
@@ -12,6 +14,7 @@ export function App() {
   const [outbox, setOutbox] = useState<OutboxOperation[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
+  const [hours, setHours] = useState<HoursPayload | null>(null);
 
   const refresh = useCallback(async () => {
     try {
@@ -22,6 +25,15 @@ export function App() {
         calendar.listOutbox(),
       ]);
       setMeta(nextMeta);
+      let nextHours: HoursPayload | null = null;
+      if (slice2Enabled(nextMeta)) {
+        try {
+          nextHours = await api<HoursPayload>("/api/hours");
+        } catch {
+          nextHours = null;
+        }
+      }
+      setHours(nextHours);
       setTasks(taskBody.tasks);
       setProposals(snapshot.proposals);
       setBlocks(snapshot.blocks);
@@ -54,6 +66,7 @@ export function App() {
       blocks={blocks}
       proposals={proposals}
       outbox={outbox}
+      hours={hours}
       loading={loading && !meta}
       error={error}
       onRefresh={refresh}

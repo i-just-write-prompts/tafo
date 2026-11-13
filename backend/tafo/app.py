@@ -27,15 +27,20 @@ from tafo.decisions import (
     stage_approval,
     undo_block_approval,
 )
+from tafo.feedback import feedback_configured, screenshot_default_on, submit_feedback
+from tafo.hours_store import delete_sacred, ensure_defaults, hours_payload, replace_category_hours, upsert_sacred
 from tafo.migrate import apply_migrations
 from tafo.outbox import list_outbox, process_outbox, serialize_outbox
 from tafo.problems import Problem
 from tafo.schemas import (
     DecisionBody,
     EditBody,
+    CategoryHoursPut,
+    FeedbackSubmit,
     PlanCommit,
     ProposalCreate,
     RestoreBody,
+    SacredWindowBody,
     SubtaskCreate,
     SubtaskPatch,
     TaskCreate,
@@ -94,6 +99,7 @@ def init_db(settings: Settings, adapter: CalendarAdapter) -> None:
     pending: list[dict] = []
     try:
         apply_migrations(conn)
+        ensure_defaults(conn)
         if settings.seed_demo:
             conn.execute("BEGIN IMMEDIATE")
             try:
@@ -362,6 +368,11 @@ def create_app(settings: Settings | None = None, adapter: CalendarAdapter | None
             "human_edits_auto_approve": settings.human_edits_auto_approve,
             "preview": settings.preview,
             "preview_banner": PREVIEW_BANNER if settings.preview else "",
+            "features": {
+                "slice2": settings.slice2,
+                "feedback_configured": feedback_configured(settings),
+                "feedback_screenshot_default": screenshot_default_on(settings) if settings.slice2 else False,
+            },
         }
 
     @app.get("/api/hermes/contract", tags=["hermes"])
@@ -658,6 +669,48 @@ def create_app(settings: Settings | None = None, adapter: CalendarAdapter | None
         start_at = parse_utc(start) if start else utc_now()
         end_at = parse_utc(end) if end else utc_now() + timedelta(days=2)
         return availability_report(settings, adapter, start_at, end_at)
+
+    @app.get("/api/hours", tags=["hours"])
+    def get_hours() -> dict:
+        if not settings.slice2:
+            raise Problem(404, "slice2_off", "Slice 2 is not enabled.")
+        with read_session(settings.db_path) as conn:
+            return hours_payload(conn)
+
+    @app.put("/api/hours/category", tags=["hours"])
+    def put_category_hours(body: CategoryHoursPut, request: Request) -> dict:
+        _require_human(request)
+        if not settings.slice2:
+            raise Problem(404, "slice2_off", "Slice 2 is not enabled.")
+        with session(settings.db_path) as conn:
+            replace_category_hours(conn, [span.model_dump() for span in body.spans])
+            return hours_payload(conn)
+
+    @app.post("/api/hours/sacred", tags=["hours"])
+    def post_sacred_window(body: SacredWindowBody, request: Request) -> dict:
+        _require_human(request)
+        if not settings.slice2:
+            raise Problem(404, "slice2_off", "Slice 2 is not enabled.")
+        with session(settings.db_path) as conn:
+            window = upsert_sacred(conn, body.model_dump())
+            return {"window": window, **hours_payload(conn)}
+
+    @app.delete("/api/hours/sacred/{window_id}", tags=["hours"])
+    def remove_sacred_window(window_id: str, request: Request) -> dict:
+        _require_human(request)
+        if not settings.slice2:
+            raise Problem(404, "slice2_off", "Slice 2 is not enabled.")
+        with session(settings.db_path) as conn:
+            delete_sacred(conn, window_id)
+            return hours_payload(conn)
+
+    @app.post("/api/feedback", tags=["feedback"])
+    def post_feedback(body: FeedbackSubmit, request: Request) -> dict:
+        _require_human(request)
+        if not settings.slice2:
+            raise Problem(404, "slice2_off", "Slice 2 is not enabled.")
+        with session(settings.db_path) as conn:
+            return submit_feedback(conn, settings, body.model_dump())
 
     @app.get("/api/calendar/suggestion", tags=["calendar"])
     def get_suggestion(task_id: str | None = None, duration_minutes: int | None = None) -> dict:

@@ -62,6 +62,8 @@ def force_safe_env(db_path: Path) -> None:
     os.environ["TAFO_WORK_INVITE_EMAIL"] = ""
     os.environ["TAFO_HUMAN_EDITS_AUTO_APPROVE"] = "1"
     os.environ["TAFO_E2E"] = "1"
+    os.environ["TAFO_SLICE2"] = "1"
+    os.environ["TAFO_FEEDBACK_MOCK_ISSUE"] = "42"
 
 
 def register_e2e_reset(app, db_path: Path) -> None:

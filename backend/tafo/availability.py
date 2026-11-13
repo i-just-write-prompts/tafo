@@ -8,6 +8,7 @@ from tafo.blocks import blocks_overlapping
 from tafo.calendar_adapter import OUTLOOK_GAP, BusyInterval, CalendarAdapter
 from tafo.config import Settings
 from tafo.db import read_session
+from tafo.hours_store import ensure_defaults, in_category_hours, overlapping_sacred
 from tafo.timeutil import fmt_utc, overlaps, parse_utc, to_local_naive, utc_now
 
 
@@ -98,13 +99,16 @@ def suggest_slot(
     duration = timedelta(minutes=duration_minutes)
     from zoneinfo import ZoneInfo
 
+    with read_session(settings.db_path) as conn:
+        ensure_defaults(conn)
+
     tz = ZoneInfo(tz_name)
     now_local = now_utc.astimezone(tz)
     chosen: datetime | None = None
     avoided = False
     for day_offset in range(7):
         day = (now_local + timedelta(days=day_offset)).date()
-        for minute in range(9 * 60, 16 * 60, 30):
+        for minute in range(0, 24 * 60, 30):
             start_local = datetime(
                 day.year,
                 day.month,
@@ -114,9 +118,19 @@ def suggest_slot(
                 tzinfo=tz,
             )
             end_local = start_local + duration
-            if end_local.hour > 16 or (end_local.hour == 16 and end_local.minute > 0):
+            if end_local.date() != start_local.date():
                 continue
             if start_local <= now_local + timedelta(minutes=15):
+                continue
+            end_minute = end_local.hour * 60 + end_local.minute
+            weekday = start_local.weekday()
+            if settings.slice2:
+                with read_session(settings.db_path) as conn:
+                    if not in_category_hours(conn, "work", weekday, minute, end_minute):
+                        continue
+                    if overlapping_sacred(conn, weekday, minute, end_minute, agent_only=True):
+                        continue
+            elif minute < 9 * 60 or end_minute > 16 * 60:
                 continue
             start_utc = start_local.astimezone(timezone.utc).replace(microsecond=0)
             end_utc = end_local.astimezone(timezone.utc).replace(microsecond=0)

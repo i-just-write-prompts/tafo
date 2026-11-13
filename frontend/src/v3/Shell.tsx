@@ -59,6 +59,14 @@ import { ALL_SHOWN, buildEvents, showSummary, visibleEvents, withMove, type CalE
 import { approveDisabled, conflictingMoveIds, enterPlan, exitPlan, includedIds, loadPlan, pendingProposalIds, proposalsOnDays, retainMoves, sameInstant, savePlan, stageMove, toggleSkip, type PlanSession, type StagedMove } from "./session";
 import { wrapWeekTitle } from "./titles";
 import { showUndo, type UndoToast } from "./undo";
+import { EventDetailsSlice2 } from "../v4/EventDetailsSlice2";
+import { FeedbackSheet } from "../v4/FeedbackSheet";
+import { HoursMenuRow, HoursSheet } from "../v4/HoursSheets";
+import { SacredBands } from "../v4/SacredBands";
+import { TrayMessage } from "../v4/TrayMessage";
+import type { FeedbackContext } from "../v4/feedbackCapture";
+import type { HoursPayload } from "../v4/hoursTypes";
+import { useSlice2Integration } from "../v4/useSlice2Integration";
 import "./v3.css";
 
 const TIP_KEY = "tafo.planTipShown";
@@ -75,7 +83,9 @@ type Overlay =
   | { kind: "event"; id: string }
   | { kind: "review" }
   | { kind: "revert" }
-  | { kind: "fixed"; id: string; start: string; end: string };
+  | { kind: "fixed"; id: string; start: string; end: string }
+  | { kind: "hours" }
+  | { kind: "feedback"; context: FeedbackContext; screenshot: string | null };
 
 interface DragOrigin {
   id: string;
@@ -112,6 +122,7 @@ interface Props {
   blocks: CalendarBlock[];
   proposals: Proposal[];
   outbox: OutboxOperation[];
+  hours: HoursPayload | null;
   loading: boolean;
   error: string | null;
   onRefresh: () => Promise<void>;
@@ -256,6 +267,19 @@ export function CalendarShell(props: Props) {
 
   const dayEvents = shown.filter((event) => event.dayKey === anchor);
   const weekEvents = shown.filter((event) => weekKeys.includes(event.dayKey));
+
+  const slice2 = useSlice2Integration({
+    meta: props.meta,
+    hours: props.hours,
+    mode,
+    anchor,
+    planActive: plan.active,
+    stagedCount: plan.moves.length,
+    overlayKind: overlay?.kind ?? null,
+    openEventId: overlay?.kind === "event" ? overlay.id : null,
+    events: serverEvents,
+    onOpenFeedback: (context, screenshot) => setOverlay({ kind: "feedback", context, screenshot }),
+  });
   const rangeIds = pendingProposalIds(
     proposalsOnDays(baseEvents, mode === "day" ? [anchor] : weekKeys).map((event) => event.id),
     plan.moves,
@@ -433,7 +457,14 @@ export function CalendarShell(props: Props) {
     window.setTimeout(() => setLive(message), 20);
   }
 
-  function pushToast(message: string, undoFn?: () => Promise<void>, retryFn?: () => Promise<void>) {
+  function pushToast(message: string, undoFn?: () => Promise<void>, retryFn?: () => Promise<void>, headsUp?: string) {
+    if (slice2.enabled && !headsUp?.includes("changed")) {
+      const parts = message.split("→");
+      const line1 = parts.length > 1 ? `${parts[0].trim()} → ${parts[1].trim()}` : message;
+      slice2.pushTray({ line1, line2: headsUp, undo: undoFn ?? null });
+      say(headsUp ? `${line1}. ${headsUp}` : line1);
+      return;
+    }
     const token = toastToken.current + 1;
     toastToken.current = token;
     setToast(showUndo(message, null, Date.now(), token));
@@ -535,8 +566,9 @@ export function CalendarShell(props: Props) {
           );
           return;
         }
-        const hour = withMove(event, startIso, endIso, timeZone).startHour;
-        pushToast(quickToast(event.title, hour));
+        const moved = withMove(event, startIso, endIso, timeZone);
+        const heads = slice2.dragHeadsUp(event.domain, PlanTime.weekdayIndex(moved.dayKey), moved.startHour, moved.endHour);
+        pushToast(quickToast(event.title, moved.startHour), undefined, undefined, heads?.trayLine);
       } else {
         const block = propsRef.current.blocks.find((item) => item.id === event.id);
         if (!block) return;
@@ -564,26 +596,32 @@ export function CalendarShell(props: Props) {
           );
           return;
         }
-        const hour = withMove(event, startIso, endIso, timeZone).startHour;
-        const message = quickToast(event.title, hour);
+        const moved = withMove(event, startIso, endIso, timeZone);
+        const heads = slice2.dragHeadsUp(event.domain, PlanTime.weekdayIndex(moved.dayKey), moved.startHour, moved.endHour);
+        const message = quickToast(event.title, moved.startHour);
         const nextBlock = saved.block;
-        pushToast(message, nextBlock ? async () => {
-          await calendar.undo({
-            kind: "block",
-            title: event.title,
-            startsAt: original.start,
-            endsAt: original.end,
-            timeZone,
-            acknowledgeFixed,
-            block: nextBlock,
-          });
-          setOverrides((current) => {
-            const copy = { ...current };
-            delete copy[event.id];
-            return copy;
-          });
-          await propsRef.current.onRefresh();
-        } : undefined);
+        pushToast(
+          message,
+          nextBlock ? async () => {
+            await calendar.undo({
+              kind: "block",
+              title: event.title,
+              startsAt: original.start,
+              endsAt: original.end,
+              timeZone,
+              acknowledgeFixed,
+              block: nextBlock,
+            });
+            setOverrides((current) => {
+              const copy = { ...current };
+              delete copy[event.id];
+              return copy;
+            });
+            await propsRef.current.onRefresh();
+          } : undefined,
+          undefined,
+          heads?.trayLine,
+        );
         rememberTip(message);
       }
       glowIds([event.id]);
@@ -1065,7 +1103,16 @@ export function CalendarShell(props: Props) {
   }
 
   const lifted = gesture.phase === "lifted";
-  const crossing = dragPreview ? crossingFor(dragPreview, serverEvents) : false;
+  const dragEvent = dragPreview ? serverEvents.find((item) => item.id === dragPreview.id) : null;
+  const dragHeads = dragPreview && dragEvent
+    ? slice2.dragHeadsUp(
+      dragEvent.domain,
+      PlanTime.weekdayIndex(dragPreview.dayKey),
+      dragPreview.startHour,
+      dragPreview.startHour + (dragEvent.endHour - dragEvent.startHour),
+    )
+    : null;
+  const crossing = dragPreview ? (dragHeads?.label ?? (crossingFor(dragPreview, serverEvents) ? "Work hours" : null)) : null;
   const liveParts = dragPreview ? readoutParts(dragPreview, serverEvents) : null;
   const layout = frame ? "frame" : "flow";
   const sheetOpen = overlay != null && overlay.kind !== "menu" && overlay.kind !== "view";
@@ -1080,7 +1127,12 @@ export function CalendarShell(props: Props) {
       data-plan={plan.active ? "on" : "off"}
       data-sheet={sheetOpen ? "1" : "0"}
       data-toast={toast && !sheetOpen ? "1" : "0"}
+      data-slice2={slice2.enabled ? "1" : "0"}
       data-narrow={weekColumnWidth(Math.max(width, 320)) < 52 ? "1" : "0"}
+      onPointerDown={slice2.enabled ? slice2.onRootPointerDown : undefined}
+      onPointerMove={slice2.enabled ? slice2.onRootPointerMove : undefined}
+      onPointerUp={slice2.enabled ? slice2.onRootPointerUp : undefined}
+      onPointerCancel={slice2.enabled ? slice2.onRootPointerUp : undefined}
     >
       <StatusBar framed={framedClock} time={now} timeZone={timeZone} />
       {plan.active ? (
@@ -1091,7 +1143,8 @@ export function CalendarShell(props: Props) {
           live={lifted && liveParts != null}
           liveTitle={liveParts?.title ?? ""}
           liveWhen={liveParts?.when ?? ""}
-          crossing={lifted && crossing}
+          crossing={lifted && Boolean(crossing)}
+          crossingLabel={crossing ?? undefined}
           conflict={conflictLabel}
           compact={width < 380}
           onExit={() => { setPlan(exitPlan()); setOverlay(null); }}
@@ -1182,6 +1235,10 @@ export function CalendarShell(props: Props) {
               settle={settle}
               lockId={lockId}
               openId={overlay?.kind === "event" ? overlay.id : null}
+              sacred={slice2.enabled ? props.hours?.sacred_windows ?? [] : []}
+              weekday={PlanTime.weekdayIndex(anchor)}
+              outsideIds={slice2.outsideIds}
+              dragTag={dragHeads?.label}
               onPointerDown={onPointerDown}
               onKeyDown={onBlockKey}
               onOpen={openEvent}
@@ -1225,6 +1282,15 @@ export function CalendarShell(props: Props) {
           <p className="sub">{(props.meta?.sync_label || "").replaceAll("NOT synced", "Not synced")}</p>
         </div>
       </div>
+      {slice2.trayMsg ? (
+        <TrayMessage
+          line1={slice2.trayMsg.line1}
+          line2={slice2.trayMsg.line2}
+          undo={slice2.trayMsg.undo}
+          feedback={slice2.trayMsg.feedback}
+          onDone={() => slice2.setTrayMsg(null)}
+        />
+      ) : null}
       <div className="v3-tray">
         <button type="button" className="tray-grip" data-testid="tray-grip" aria-label="Calendar tray" onPointerDown={onTrayPointer} />
         <button type="button" className="unscheduled" data-testid="unscheduled" onClick={() => setTrayOpen(true)}>
@@ -1268,6 +1334,14 @@ export function CalendarShell(props: Props) {
           <button type="button" role="menuitem" className="tall" onClick={() => setOverlay({ kind: "show" })}><span>Show…<small>{showSummary(filters)}</small></span></button>
           <button type="button" role="menuitem" onClick={() => setOverlay({ kind: "sync" })}>Sync: {syncText}</button>
           <button type="button" role="menuitem" onClick={() => setOverlay({ kind: "settings" })}>Settings</button>
+          {slice2.enabled ? (
+            <HoursMenuRow summary={props.hours?.summary ?? "Hours loading…"} onOpen={() => setOverlay({ kind: "hours" })} />
+          ) : null}
+          {slice2.enabled ? (
+            <button type="button" role="menuitem" className="tall" data-testid="send-feedback-row" onClick={() => { setOverlay(null); slice2.openFeedbackFromMenu(); }}>
+              <span>Send feedback{slice2.feedbackSubtitle ? <small>{slice2.feedbackSubtitle}</small> : null}</span>
+            </button>
+          ) : null}
         </div>
       ) : null}
       {overlay.kind === "show" ? <ShowSheet filters={filters} onChange={setFilters} /> : null}
@@ -1278,16 +1352,51 @@ export function CalendarShell(props: Props) {
       {overlay.kind === "sync" ? <SyncSheet meta={props.meta} text={syncText} /> : null}
       {overlay.kind === "unscheduled" ? <UnscheduledSheet tasks={loose} /> : null}
       {overlay.kind === "event" ? (
-        <EventSheet
-          event={events.find((item) => item.id === overlay.id) ?? serverEvents.find((item) => item.id === overlay.id) ?? null}
-          onClose={() => setOverlay(null)}
-          onDecide={decide}
-          onRetry={(event) => {
-            if (!event.outboxId) return;
+        slice2.enabled ? (
+          <EventDetailsSlice2
+            event={events.find((item) => item.id === overlay.id) ?? serverEvents.find((item) => item.id === overlay.id)!}
+            block={props.blocks.find((item) => item.id === overlay.id) ?? null}
+            task={props.tasks.find((item) => item.id === (props.blocks.find((b) => b.id === overlay.id)?.task_id ?? "")) ?? null}
+            hours={props.hours}
+            timeZone={timeZone}
+            onClose={() => setOverlay(null)}
+            onRefresh={props.onRefresh}
+            onDecide={decide}
+            onRetry={(event) => {
+              if (!event.outboxId) return;
+              setOverlay(null);
+              void retryRefused(event.outboxId, event.title, event.start, event.end, unplacedToast(event.title), event.id);
+            }}
+            onTime={() => pushToast("Drag the block to change the time.")}
+            onComplete={(title, undoFn) => pushToast(`${title} done`, undoFn)}
+          />
+        ) : (
+          <EventSheet
+            event={events.find((item) => item.id === overlay.id) ?? serverEvents.find((item) => item.id === overlay.id) ?? null}
+            onClose={() => setOverlay(null)}
+            onDecide={decide}
+            onRetry={(event) => {
+              if (!event.outboxId) return;
+              setOverlay(null);
+              void retryRefused(event.outboxId, event.title, event.start, event.end, unplacedToast(event.title), event.id);
+            }}
+            onTime={() => pushToast("Drag the block to change the time.")}
+          />
+        )
+      ) : null}
+      {overlay.kind === "hours" && props.hours ? (
+        <HoursSheet payload={props.hours} onClose={() => setOverlay(null)} onChanged={() => props.onRefresh()} />
+      ) : null}
+      {overlay.kind === "feedback" ? (
+        <FeedbackSheet
+          context={overlay.context}
+          screenshot={overlay.screenshot}
+          screenshotDefault={Boolean(props.meta?.features?.feedback_screenshot_default)}
+          onCancel={() => setOverlay(null)}
+          onSend={(note, shot) => {
             setOverlay(null);
-            void retryRefused(event.outboxId, event.title, event.start, event.end, unplacedToast(event.title), event.id);
+            void slice2.submitFeedback(note, overlay.context, shot);
           }}
-          onTime={() => pushToast("Drag the block to change the time.")}
         />
       ) : null}
       {overlay.kind === "review" ? (
@@ -1448,6 +1557,7 @@ function PlanBanner(props: {
   liveTitle: string;
   liveWhen: string;
   crossing: boolean;
+  crossingLabel?: string;
   conflict: string;
   compact: boolean;
   onExit: () => void;
@@ -1469,7 +1579,7 @@ function PlanBanner(props: {
         ) : <p>{props.text}</p>}
         {props.conflict && !props.compact ? <p data-testid="plan-conflict">{props.conflict}</p> : null}
       </div>
-      {props.live && props.crossing ? <span className="tag">Crosses work hours</span> : null}
+      {props.live && props.crossing ? <span className="tag">{props.crossingLabel ?? "Crosses work hours"}</span> : null}
       {!props.live && props.count === 0 && props.suggestions === 0 ? <button type="button" className="ghost-btn" onClick={props.onExit}>Exit</button> : null}
       {!props.live && props.count === 0 && props.suggestions > 0 ? (
         <div className="banner-actions">
@@ -1544,6 +1654,10 @@ function DayCanvas(props: {
   settle: Settle | null;
   lockId: string | null;
   openId: string | null;
+  sacred?: import("../v4/hoursTypes").SacredWindow[];
+  weekday?: number;
+  outsideIds?: Set<string>;
+  dragTag?: string;
   onPointerDown: (event: CalEvent, pointer: React.PointerEvent<HTMLButtonElement>) => void;
   onKeyDown: (event: CalEvent, key: React.KeyboardEvent) => void;
   onOpen: (event: CalEvent) => void;
@@ -1556,8 +1670,14 @@ function DayCanvas(props: {
   for (let hour = 9; hour <= 18; hour += 1) hours.push(hour);
   return (
     <>
-      <div className="workband" style={{ left: DAY_GUTTER, top: dayY(9), right: 0, height: dayY(17) - dayY(9) }} />
-      <div className="work-end" style={{ top: dayY(17) - 4 }}>Work hours end</div>
+      {props.sacred && props.weekday != null ? (
+        <SacredBands windows={props.sacred} weekday={props.weekday} width={props.width - DAY_GUTTER} />
+      ) : (
+        <>
+          <div className="workband" style={{ left: DAY_GUTTER, top: dayY(9), right: 0, height: dayY(17) - dayY(9) }} />
+          <div className="work-end" style={{ top: dayY(17) - 4 }}>Work hours end</div>
+        </>
+      )}
       {hours.map((hour) => (
         <div key={hour}>
           <div className="hour-line" style={{ top: dayY(hour) }} />
@@ -1589,6 +1709,8 @@ function DayCanvas(props: {
             glow={props.glow.includes(event.id)}
             settle={props.settle}
             lockId={props.lockId}
+            outsideHours={props.outsideIds?.has(event.id)}
+            dragTag={lifted ? props.dragTag : undefined}
             onPointerDown={props.onPointerDown}
             onKeyDown={props.onKeyDown}
             onOpen={props.onOpen}
@@ -1596,7 +1718,7 @@ function DayCanvas(props: {
         );
       })}
       {props.nowHour != null ? <NowMark hour={props.nowHour} left={DAY_GUTTER} width={props.width - DAY_GUTTER} hidePill={hideNowPill(markY, dayY(props.nowHour), 11, 8)} /> : null}
-      {props.drag ? <DayPill hour={props.drag.startHour} blockX={boxes.find((box) => box.id === props.drag?.id)?.x ?? DAY_GUTTER} /> : null}
+      {props.drag ? <DayPill hour={props.drag.startHour} blockX={boxes.find((box) => box.id === props.drag?.id)?.x ?? DAY_GUTTER} tag={props.dragTag} /> : null}
     </>
   );
 }
@@ -1611,7 +1733,7 @@ function ghostStyle(box: { x: number; y: number; w: number; h: number } | undefi
   return { left: box.x, top: box.y, width: box.w, height: box.h };
 }
 
-function DayPill({ hour, blockX }: { hour: number; blockX: number }) {
+function DayPill({ hour, blockX, tag }: { hour: number; blockX: number; tag?: string }) {
   const y = dayY(hour);
   const width = 52;
   const x = DAY_GUTTER - 6 - width;
@@ -1619,6 +1741,7 @@ function DayPill({ hour, blockX }: { hour: number; blockX: number }) {
     <>
       <div className="leader" style={{ left: DAY_GUTTER - 6, width: Math.max(0, blockX - DAY_GUTTER + 4), top: y }} />
       <div className="gutter-pill" style={{ left: x, top: y - 11, width, height: 22 }}>{gutterClock(hour)}</div>
+      {tag ? <span className="drag-hours-tag">{tag}</span> : null}
     </>
   );
 }
@@ -1645,6 +1768,8 @@ function EventButton(props: {
   glow: boolean;
   settle: Settle | null;
   lockId: string | null;
+  outsideHours?: boolean;
+  dragTag?: string;
   onPointerDown: (event: CalEvent, pointer: React.PointerEvent<HTMLButtonElement>) => void;
   onKeyDown: (event: CalEvent, key: React.KeyboardEvent) => void;
   onOpen: (event: CalEvent) => void;
@@ -1686,8 +1811,12 @@ function EventButton(props: {
           <strong>{event.title}</strong>
           {one && !(props.lifted && box.w < 200) ? <span>{event.state === "unplaced" ? `${clockMinutes(event.startHour)} · Not on calendar` : time}</span> : null}
           {!one ? <span>{event.state === "unplaced" ? `${clockMinutes(event.startHour)} · Not on calendar` : `${time}${event.state === "proposed" ? " · Proposed" : ""}`}</span> : null}
+          {props.lifted && props.dragTag ? <span className="drag-hours-tag in-block">{props.dragTag}</span> : null}
         </span>
       </span>
+      {props.outsideHours && event.state !== "proposed" ? (
+        <span className="outside-clock" data-testid="outside-clock" aria-hidden="true" />
+      ) : null}
       {event.state === "proposed" ? (
         <span className="corner" style={{ left: box.x - tap.x + box.w - 8, top: box.y - tap.y, color: line(event.domain) }}>
           <i className="halo" style={{ background: event.startHour >= 9 && event.startHour < 17 ? "var(--workband)" : "var(--bg)" }} />
