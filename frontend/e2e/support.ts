@@ -10,6 +10,9 @@ const shotRoot = path.join(repoRoot, "review-screenshots");
 /** Tuesday 10 Nov 2026, 10:40 in America/Indianapolis. */
 export const FIXTURE_NOW = Date.parse("2026-11-10T15:40:00Z");
 
+/** One hour of vertical drag at the grid's 15-minute snap scale (matches `DAY_PX` in geometry). */
+export const HOUR_DRAG_PX = 72;
+
 export async function reseed(request: APIRequestContext): Promise<void> {
   const response = await request.post("/api/e2e/reset");
   expect(response.ok(), await response.text()).toBeTruthy();

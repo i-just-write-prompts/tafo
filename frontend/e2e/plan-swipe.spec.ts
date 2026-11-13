@@ -1,6 +1,6 @@
 import { expect, test } from "@playwright/test";
 
-import { block, center, dragHold, openDay, openWeek, press, reseed, skipUnlessTouch, touchDrag, touchSwipe } from "./support";
+import { block, center, dragHold, HOUR_DRAG_PX, openDay, openWeek, press, reseed, skipUnlessTouch, touchDrag, touchSwipe } from "./support";
 
 /**
  * v4 testids:
@@ -17,7 +17,7 @@ test.beforeEach(async ({ page, request }, testInfo) => {
 
 test("swipe and jump keep plan banner and staged moves", async ({ page }, testInfo) => {
   const vendor = await center(block(page, "Call vendor,"));
-  await dragHold(page, vendor.x, vendor.y, vendor.x, vendor.y + 60);
+  await dragHold(page, vendor.x, vendor.y, vendor.x, vendor.y + HOUR_DRAG_PX);
   await expect(page.getByTestId("plan-banner")).toContainText("1 move");
 
   const staged = JSON.parse(await page.evaluate(() => localStorage.getItem("tafo.v3.plan.v2") || "null"));

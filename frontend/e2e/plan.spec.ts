@@ -1,7 +1,7 @@
 import { expect, test, type Locator, type Page, type Route } from "@playwright/test";
 
 import { armWriteFailure, checkSaveClaim, readCalendar, uiWhen } from "./helpers/saveClaim";
-import { block, center, dragHold, openDay, press, reseed, shot } from "./support";
+import { block, center, dragHold, HOUR_DRAG_PX, openDay, press, reseed, shot } from "./support";
 
 async function titleLayout(button: Locator) {
   await expect(button).toBeVisible();
@@ -127,7 +127,7 @@ test("quick drag saves with a toast and Undo", async ({ page }, testInfo) => {
   const grid = page.getByTestId("day-grid");
   const scrollBefore = await grid.evaluate((node) => node.scrollTop);
   const gridBefore = await grid.boundingBox();
-  await dragHold(page, start.x, start.y, start.x, start.y + 60);
+  await dragHold(page, start.x, start.y, start.x, start.y + HOUR_DRAG_PX);
   const toast = page.getByTestId("plan-toast");
   await checkSaveClaim(page, {
     case: "matches-server",
@@ -292,7 +292,7 @@ test("narrow week drags retimes morning blocks and a partly hidden one", async (
     expect(clipped.y).toBeLessThan(gridNow.y + 4);
     const x = clipped.x + clipped.width / 2;
     const y = Math.min(gridNow.y + gridNow.height - 24, Math.max(gridNow.y + 16, clipped.y + 20));
-    await dragBy("Hike", x, y, x, y + 60);
+    await dragBy("Hike", x, y, x, y + HOUR_DRAG_PX);
     await expect(hike).not.toHaveAttribute("aria-label", hikeBefore ?? "");
   }
 });
@@ -505,9 +505,9 @@ test("rearrange several items then Approve all", async ({ page }, testInfo) => {
 test("Revert restores staged moves and leaves proposals pending", async ({ page }, testInfo) => {
   await press(page.getByRole("button", { name: "Plan mode" }), testInfo.project.name);
   const vendor = await center(block(page, "Call vendor,"));
-  await dragHold(page, vendor.x, vendor.y, vendor.x, vendor.y + 60);
+  await dragHold(page, vendor.x, vendor.y, vendor.x, vendor.y + HOUR_DRAG_PX);
   const lunch = await center(block(page, "Lunch w/ Sam"));
-  await dragHold(page, lunch.x, lunch.y, lunch.x, lunch.y + 60);
+  await dragHold(page, lunch.x, lunch.y, lunch.x, lunch.y + HOUR_DRAG_PX);
   await expect(page.getByTestId("plan-banner")).toContainText("2 moves");
   await press(page.getByRole("button", { name: "Revert" }), testInfo.project.name);
   await shot(page, testInfo, "revert-sheet");
@@ -1126,7 +1126,7 @@ test("R5 unsynced moved proposal does not block healthy moves", async ({ page },
   const budget = block(page, "Budget sheet");
   await budget.scrollIntoViewIfNeeded();
   const at = await center(budget);
-  await uiDrag(page, testInfo.project.name, at.x, at.y, at.x, at.y + 60);
+  await uiDrag(page, testInfo.project.name, at.x, at.y, at.x, at.y + HOUR_DRAG_PX);
   await armWriteFailure(page, [], 1);
   await press(page.getByRole("button", { name: "Review", exact: true }), testInfo.project.name);
   await press(page.getByRole("button", { name: /Approve all/ }), testInfo.project.name);
@@ -1143,7 +1143,7 @@ test("R5 unsynced moved proposal does not block healthy moves", async ({ page },
       const call = block(page, "Call vendor");
       await call.scrollIntoViewIfNeeded();
       const from = await center(call);
-      await dragHold(page, from.x, from.y, from.x, from.y + 60);
+      await dragHold(page, from.x, from.y, from.x, from.y + HOUR_DRAG_PX);
       await press(page.getByRole("button", { name: "Review", exact: true }), testInfo.project.name);
       await press(page.getByRole("button", { name: /Approve all/ }), testInfo.project.name);
     },
@@ -1301,7 +1301,7 @@ test("V3 touch double-tap on Approve all commits once", async ({ page }, testInf
   });
   await press(page.getByRole("button", { name: "Plan mode" }), testInfo.project.name);
   const vendor = await center(block(page, "Call vendor,"));
-  await dragHold(page, vendor.x, vendor.y, vendor.x, vendor.y + 60);
+  await dragHold(page, vendor.x, vendor.y, vendor.x, vendor.y + HOUR_DRAG_PX);
   const staged = JSON.parse(await page.evaluate(() => localStorage.getItem("tafo.v3.plan.v2") || "null"));
   await press(page.getByRole("button", { name: "Review", exact: true }), testInfo.project.name);
   const sheet = page.getByTestId("review-sheet");
@@ -1405,7 +1405,7 @@ test.describe("motion", () => {
   test("opening Review does not scroll the page or overshoot the sheet", async ({ page }, testInfo) => {
     await press(page.getByTestId("plan-button"), testInfo.project.name);
     const vendor = await center(block(page, "Call vendor,"));
-    await dragHold(page, vendor.x, vendor.y, vendor.x, vendor.y + 60);
+    await dragHold(page, vendor.x, vendor.y, vendor.x, vendor.y + HOUR_DRAG_PX);
     await page.evaluate(() => {
       const samples: Array<{ shell: number; grid: number; banner: number; top: number | null }> = [];
       (window as unknown as { __sheet: typeof samples }).__sheet = samples;

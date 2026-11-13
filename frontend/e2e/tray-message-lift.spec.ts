@@ -1,6 +1,6 @@
 import { expect, test } from "@playwright/test";
 
-import { block, center, dragHold, openDay, reseed, skipUnlessTouch, touchDrag } from "./support";
+import { block, center, dragHold, HOUR_DRAG_PX, openDay, reseed, skipUnlessTouch, touchDrag } from "./support";
 
 /**
  * v4 testids:
@@ -20,7 +20,7 @@ test("save, then within 4 s tap or drag a block in the bottom 48pt", async ({ pa
   const scrollBefore = await grid.evaluate((node) => node.scrollTop);
   const insetBefore = Number(await grid.getAttribute("data-bottom-inset-pt")) || 0;
 
-  await dragHold(page, vendor.x, vendor.y, vendor.x, vendor.y + 60);
+  await dragHold(page, vendor.x, vendor.y, vendor.x, vendor.y + HOUR_DRAG_PX);
   const message = page.getByTestId("tray-save-message");
   await expect(message).toBeVisible();
   await expect(message).toContainText(/Call vendor →/i);
@@ -47,7 +47,7 @@ test("save, then within 4 s tap or drag a block in the bottom 48pt", async ({ pa
   await expect(grid).toHaveAttribute("data-bottom-inset-pt", String(insetBefore));
   await expect(page.getByTestId("autoscroll-zone-bottom")).toHaveAttribute("data-above-tray", "1");
 
-  await dragHold(page, vendor.x, vendor.y, vendor.x, vendor.y + 60);
+  await dragHold(page, vendor.x, vendor.y, vendor.x, vendor.y + HOUR_DRAG_PX);
   await expect(message).toBeVisible();
   const toastBox = await message.boundingBox();
   if (!toastBox) throw new Error("message missing");
