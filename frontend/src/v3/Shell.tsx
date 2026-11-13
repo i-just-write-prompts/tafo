@@ -458,13 +458,19 @@ export function CalendarShell(props: Props) {
   }
 
   function pushToast(message: string, undoFn?: () => Promise<void>, retryFn?: () => Promise<void>, headsUp?: string) {
-    if (slice2.enabled && !headsUp?.includes("changed")) {
-      const parts = message.split("→");
-      const line1 = parts.length > 1 ? `${parts[0].trim()} → ${parts[1].trim()}` : message;
-      slice2.pushTray({ line1, line2: headsUp, undo: undoFn ?? null });
-      say(headsUp ? `${line1}. ${headsUp}` : line1);
+    const quickSave = message.includes("→") && !message.startsWith("Denied");
+    const traySave = slice2.enabled
+      && !message.includes("changed")
+      && (Boolean(undoFn) || Boolean(retryFn) || Boolean(headsUp) || quickSave || message.includes("not on calendar"));
+    if (traySave) {
+      setToast(null);
+      setUndo(null);
+      setRetry(null);
+      slice2.pushTray({ message, line2: headsUp, undo: undoFn ?? null, retry: retryFn ?? null });
+      say(headsUp ? `${message}. ${headsUp}` : message);
       return;
     }
+    slice2.setTrayMsg(null);
     const token = toastToken.current + 1;
     toastToken.current = token;
     setToast(showUndo(message, null, Date.now(), token));
@@ -1126,7 +1132,7 @@ export function CalendarShell(props: Props) {
       data-mode={mode}
       data-plan={plan.active ? "on" : "off"}
       data-sheet={sheetOpen ? "1" : "0"}
-      data-toast={toast && !sheetOpen ? "1" : "0"}
+      data-toast={(toast || slice2.trayMsg) && !sheetOpen ? "1" : "0"}
       data-slice2={slice2.enabled ? "1" : "0"}
       data-narrow={weekColumnWidth(Math.max(width, 320)) < 52 ? "1" : "0"}
       onPointerDown={slice2.enabled ? slice2.onRootPointerDown : undefined}
@@ -1282,15 +1288,6 @@ export function CalendarShell(props: Props) {
           <p className="sub">{(props.meta?.sync_label || "").replaceAll("NOT synced", "Not synced")}</p>
         </div>
       </div>
-      {slice2.trayMsg ? (
-        <TrayMessage
-          line1={slice2.trayMsg.line1}
-          line2={slice2.trayMsg.line2}
-          undo={slice2.trayMsg.undo}
-          feedback={slice2.trayMsg.feedback}
-          onDone={() => slice2.setTrayMsg(null)}
-        />
-      ) : null}
       <div className="v3-tray">
         <button type="button" className="tray-grip" data-testid="tray-grip" aria-label="Calendar tray" onPointerDown={onTrayPointer} />
         <button type="button" className="unscheduled" data-testid="unscheduled" onClick={() => setTrayOpen(true)}>
@@ -1309,7 +1306,15 @@ export function CalendarShell(props: Props) {
       ) : null}
       <div className="v3-toast-slot" aria-live="polite" aria-atomic="true" data-testid="live-region">
         <span className="v3-sr" style={{ position: "absolute", width: 1, height: 1, overflow: "hidden" }}>{live}</span>
-        {toast ? (
+        {slice2.trayMsg ? (
+          <TrayMessage
+            message={slice2.trayMsg.message}
+            line2={slice2.trayMsg.line2}
+            undo={slice2.trayMsg.undo}
+            retry={slice2.trayMsg.retry}
+            onDone={() => slice2.setTrayMsg(null)}
+          />
+        ) : toast ? (
           <div className="toast" data-testid="plan-toast" role="status">
             <ToastIcon message={toast.message} />
             <ToastCopy message={toast.message} />

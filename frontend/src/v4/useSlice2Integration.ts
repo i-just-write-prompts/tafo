@@ -11,9 +11,10 @@ import type { HoursPayload } from "./hoursTypes";
 import { slice2Enabled } from "./slice2";
 
 export interface TrayMsg {
-  line1: string;
+  message: string;
   line2?: string;
   undo?: (() => Promise<void>) | null;
+  retry?: (() => Promise<void>) | null;
   feedback?: boolean;
 }
 
@@ -127,14 +128,14 @@ export function useSlice2Integration(input: {
     const result = await sendFeedback(note, ctx, screenshot);
     markFeedbackSentOnce();
     if (result.status === "sent" && result.issue_number) {
-      pushTray({ line1: `Feedback sent · #${result.issue_number}`, feedback: true });
+      pushTray({ message: `Feedback sent · #${result.issue_number}`, feedback: true });
       return;
     }
     if (result.status === "not_configured") {
-      pushTray({ line1: "Saved · GitHub not configured on server", feedback: true });
+      pushTray({ message: "Saved · GitHub not configured on server", feedback: true });
       return;
     }
-    pushTray({ line1: "Saved · sends when you're back online", feedback: true });
+    pushTray({ message: "Saved · sends when you're back online", feedback: true });
   }
 
   return {

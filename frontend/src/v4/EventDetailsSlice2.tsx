@@ -103,15 +103,25 @@ export function EventDetailsSlice2(props: {
         <input
           className="title-edit"
           data-testid="event-title"
-          aria-label="Title"
+          role="heading"
+          aria-level={2}
+          aria-label={title}
           value={title}
           onChange={(e) => setTitle(e.target.value)}
           onBlur={() => void saveTitle(title.trim())}
         />
       </div>
+      <p className="sub">
+        {event.state === "unplaced"
+          ? "Not on calendar"
+          : event.state === "proposed"
+            ? `Agent suggestion · ${domainLabel(event.domain)}`
+            : domainLabel(event.domain)}
+      </p>
       {event.state === "proposed" ? (
         <span className={`proposed-chip ${event.domain}`}><Sparkle /> Proposed</span>
       ) : null}
+      {event.explanation ? <p className="why">Why: {event.explanation}</p> : null}
       <button type="button" className="time-row" onClick={props.onTime}>
         <span>{event.dayKey}</span>
         <span>{rangeLabel(event.startHour, event.endHour)} ›</span>
