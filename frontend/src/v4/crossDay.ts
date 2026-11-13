@@ -148,6 +148,11 @@ export function dwellProgress(state: CrossDayState): number {
 }
 
 export function crossDaySurfaceAt(clientX: number, clientY: number): CrossDaySurface {
+  const grid = document.querySelector('[data-testid="day-grid"]');
+  if (grid instanceof HTMLElement) {
+    const box = grid.getBoundingClientRect();
+    if (clientX >= box.left && clientX <= box.right && clientY >= box.top && clientY <= box.bottom) return "grid";
+  }
   const msg = document.querySelector('[data-testid="tray-save-message"]');
   if (msg instanceof HTMLElement) {
     const box = msg.getBoundingClientRect();

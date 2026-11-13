@@ -246,6 +246,8 @@ export function CalendarShell(props: Props) {
   const crossDayRef = useRef(crossDay);
   crossDayRef.current = crossDay;
   const [traySaveMessage, setTraySaveMessage] = useState<string | null>(null);
+  const [crossDayTrayPending, setCrossDayTrayPending] = useState(false);
+  const [trayHoldUntilAnchor, setTrayHoldUntilAnchor] = useState<string | null>(null);
   const [trayTargetDay, setTrayTargetDay] = useState<string | null>(null);
   const [trayMovedId, setTrayMovedId] = useState<string | null>(null);
   const [traySaveUndo, setTraySaveUndo] = useState<(() => Promise<void>) | null>(null);
@@ -397,7 +399,10 @@ export function CalendarShell(props: Props) {
   useEffect(() => {
     if (gesture.phase === "lifted" && mode === "day" && originRef.current) {
       const grid = gridRef.current;
-      setCrossDay(crossDayLift(originRef.current.id, originRef.current.dayKey, (grid?.scrollTop ?? 0) / PX_PER_MINUTE));
+      setCrossDay((current) => {
+        if (current.phase === "carrying") return current;
+        return crossDayLift(originRef.current!.id, originRef.current!.dayKey, (grid?.scrollTop ?? 0) / PX_PER_MINUTE);
+      });
     } else if (gesture.phase !== "lifted") {
       setCrossDay((current) => (current.phase === "carrying" ? current : crossDayIdle()));
     }
@@ -422,9 +427,9 @@ export function CalendarShell(props: Props) {
       onMove(native.clientX, native.clientY, native.pointerId, native.pointerType);
     };
     const onTouchMove = (native: TouchEvent) => {
-      const touch = native.changedTouches[0] ?? native.touches[0];
+      const touch = native.touches[0] ?? native.changedTouches[0];
       if (!touch) return;
-      onMove(touch.clientX, touch.clientY, 1, "touch");
+      onMove(touch.clientX, touch.clientY, touch.identifier, "touch");
     };
     window.addEventListener("pointermove", onPointerMove, true);
     window.addEventListener("touchmove", onTouchMove, { capture: true, passive: true });
@@ -433,6 +438,14 @@ export function CalendarShell(props: Props) {
       window.removeEventListener("touchmove", onTouchMove, true);
     };
   }, [crossDay.phase, crossDay.peeked, crossDay.eventId]);
+
+  useEffect(() => {
+    if (crossDay.phase === "carrying" && crossDay.peeked) {
+      setTrayHoldUntilAnchor(crossDay.originDayKey);
+    } else if (crossDay.phase === "idle" && !crossDayTrayPending) {
+      setTrayHoldUntilAnchor(null);
+    }
+  }, [crossDay.phase, crossDay.peeked, crossDay.originDayKey, crossDayTrayPending]);
 
   useEffect(() => {
     const grid = gridRef.current;
@@ -766,6 +779,7 @@ export function CalendarShell(props: Props) {
         if (moved.dayKey !== event.dayKey && opts?.deferTray) {
           return { line: trayLine, targetDay: moved.dayKey, undo: null };
         }
+        setTrayHoldUntilAnchor(null);
         setTraySaveMessage(trayLine);
         if (moved.dayKey !== event.dayKey) {
           setTrayTargetDay(moved.dayKey);
@@ -825,6 +839,7 @@ export function CalendarShell(props: Props) {
         if (moved.dayKey !== event.dayKey && opts?.deferTray) {
           return { line: message, targetDay: moved.dayKey, undo: undoFn ?? null };
         }
+        setTrayHoldUntilAnchor(null);
         setTraySaveMessage(message);
         if (moved.dayKey !== event.dayKey) {
           setTrayTargetDay(moved.dayKey);
@@ -895,6 +910,7 @@ export function CalendarShell(props: Props) {
 
   function finishGesture(released: Gesture, surface: "grid" | "strip" | "tray" | "message" = "grid") {
     if (released.phase === "idle") return;
+    if (crossDayTrayPending) return;
     const event = baseEvents.find((item) => item.id === released.eventId) ?? serverEvents.find((item) => item.id === released.eventId);
     if (!event) return;
     const vm = mode === "month" ? "day" : mode;
@@ -912,6 +928,8 @@ export function CalendarShell(props: Props) {
     );
   const carrying = crossDayRef.current;
     const originKey = carrying.originDayKey || event.dayKey;
+    const peekCrossDay =
+      carrying.phase === "carrying" && carrying.peeked && carrying.viewDayKey !== originKey;
     if (vm === "day" && carrying.phase === "carrying") {
       const targetMinutes = isAllDayEvent(event, timeZone) ? 0 : Math.round((preview?.startHour ?? 0) * 60);
       const { state, effect } = crossDayRelease(
@@ -929,7 +947,8 @@ export function CalendarShell(props: Props) {
       const targetDay = carrying.peeked && carrying.viewDayKey !== originKey ? carrying.viewDayKey : preview.dayKey;
       const saveHour = isAllDayEvent(event, timeZone) ? 0 : preview.startHour;
       preview = { ...preview, dayKey: targetDay, startHour: saveHour };
-      if (effect.outcome === "cross-day-save") {
+      const crossDaySave = effect.outcome === "cross-day-save" || (peekCrossDay && surface === "grid");
+      if (crossDaySave) {
         const start = atHour(preview.dayKey, preview.startHour, timeZone);
         const end = isAllDayEvent(event, timeZone)
           ? atHour(preview.dayKey, 24, timeZone)
@@ -945,19 +964,25 @@ export function CalendarShell(props: Props) {
           restoreCrossDayView(originKey, carrying.scrollMinutes);
           return;
         }
+        setTraySaveMessage(null);
+        setTrayTargetDay(null);
+        setCrossDayTrayPending(true);
+        setTrayHoldUntilAnchor(originKey);
         setAnchor(preview.dayKey);
         void saveQuick(event, start, end, false, { deferTray: true }).then((deferred) => {
           window.setTimeout(() => {
             restoreCrossDayView(originKey, carrying.scrollMinutes);
             window.setTimeout(() => {
               if (!deferred) return;
+              setCrossDayTrayPending(false);
+              setTrayHoldUntilAnchor(null);
               setTraySaveMessage(deferred.line);
               setTrayTargetDay(deferred.targetDay);
               setTrayMovedId(event.id);
               if (deferred.undo) setTraySaveUndo(() => deferred.undo!);
               pushToast(deferred.line, deferred.undo ?? undefined);
             }, 150);
-          }, 300);
+          }, 500);
         });
         return;
       }
@@ -1027,23 +1052,31 @@ export function CalendarShell(props: Props) {
     if (tip) setTip(false);
     const pointerId = pointer.pointerId;
     const touch = pointer.pointerType === "touch";
+    const touchId = touch ? pointerId : -1;
     let panning = false;
     let panOriginY = pointer.clientY;
     let panScroll = gridRef.current?.scrollTop ?? 0;
-    function move(native: PointerEvent) {
-      if (native.pointerId !== pointerId) return;
+    const detach = () => {
+      window.removeEventListener("pointermove", onPointerMove);
+      window.removeEventListener("pointerup", onPointerUp);
+      window.removeEventListener("pointercancel", onPointerUp);
+      window.removeEventListener("touchmove", onTouchMove);
+      window.removeEventListener("touchend", onTouchEnd);
+      window.removeEventListener("touchcancel", onTouchEnd);
+    };
+    function applyMove(clientX: number, clientY: number) {
       if (panning) {
-        if (gridRef.current) gridRef.current.scrollTop = panScroll - (native.clientY - panOriginY);
+        if (gridRef.current) gridRef.current.scrollTop = panScroll - (clientY - panOriginY);
         return;
       }
       const current = gestureRef.current;
-      const updated = gestureMove(current, { x: native.clientX, y: native.clientY }, performance.now());
+      const updated = gestureMove(current, { x: clientX, y: clientY }, performance.now());
       if (touch && current.phase === "pending" && updated.phase === "idle") {
         panning = true;
         panOriginY = current.origin.y;
         panScroll = gridRef.current?.scrollTop ?? 0;
         gestureRef.current = updated;
-        if (gridRef.current) gridRef.current.scrollTop = panScroll - (native.clientY - panOriginY);
+        if (gridRef.current) gridRef.current.scrollTop = panScroll - (clientY - panOriginY);
         flushSync(() => setGesture(updated));
         return;
       }
@@ -1055,14 +1088,14 @@ export function CalendarShell(props: Props) {
         const stripEl = document.querySelector('[data-testid="day-strip"]');
         if (stripEl instanceof HTMLElement) {
           const rect = stripEl.getBoundingClientRect();
-          if (native.clientY >= rect.top && native.clientY <= rect.bottom) {
+          if (clientY >= rect.top && clientY <= rect.bottom) {
             setCrossDay((state) => {
               let next = state.phase === "carrying" ? crossDayStripEnter(state) : state;
               for (const key of weekKeys) {
                 const cell = stripEl.querySelector<HTMLElement>(`[data-strip-key="${key}"]`);
                 if (!cell) continue;
                 const box = cell.getBoundingClientRect();
-                if (native.clientX >= box.left && native.clientX <= box.right) {
+                if (clientX >= box.left && clientX <= box.right) {
                   next = crossDayHoverCell(next, key);
                   break;
                 }
@@ -1080,11 +1113,11 @@ export function CalendarShell(props: Props) {
         let zone: "top" | "bottom" | null = null;
         if (topZone instanceof HTMLElement) {
           const box = topZone.getBoundingClientRect();
-          if (native.clientY >= box.top && native.clientY <= box.bottom) zone = "top";
+          if (clientY >= box.top && clientY <= box.bottom) zone = "top";
         }
         if (!zone && bottomZone instanceof HTMLElement) {
           const box = bottomZone.getBoundingClientRect();
-          if (native.clientY >= box.top && native.clientY <= box.bottom) zone = "bottom";
+          if (clientY >= box.top && clientY <= box.bottom) zone = "bottom";
         }
         if (zone !== autoScrollRef.current.zone) autoScrollRef.current = { zone, since: stamp };
         if (grid && zone && stamp - autoScrollRef.current.since >= 400) {
@@ -1102,11 +1135,8 @@ export function CalendarShell(props: Props) {
       gestureRef.current = updated;
       flushSync(() => setGesture(updated));
     }
-    function up(native: PointerEvent) {
-      if (native.pointerId !== pointerId) return;
-      window.removeEventListener("pointermove", move);
-      window.removeEventListener("pointerup", up);
-      window.removeEventListener("pointercancel", up);
+    function applyUp(clientX: number, clientY: number, kind: "pointerup" | "pointercancel") {
+      detach();
       if (panning) {
         gestureRef.current = { phase: "idle" };
         setGesture({ phase: "idle" });
@@ -1114,21 +1144,23 @@ export function CalendarShell(props: Props) {
       }
       autoScrollRef.current = { zone: null, since: 0 };
       const carryingUp = crossDayRef.current;
-      if (native.type === "pointercancel" && carryingUp.phase === "carrying") {
+      if (kind === "pointercancel" && carryingUp.phase === "carrying") {
         setCrossDay(crossDayInterrupt(carryingUp).state);
         restoreCrossDayView(carryingUp.originDayKey, carryingUp.scrollMinutes);
         gestureRef.current = { phase: "idle" };
         setGesture({ phase: "idle" });
         return;
       }
-      const surface = crossDaySurfaceAt(native.clientX, native.clientY);
+      const surface = crossDaySurfaceAt(clientX, clientY);
       const current = gestureRef.current;
       const point = current.phase === "idle"
-        ? { x: native.clientX, y: native.clientY }
+        ? { x: clientX, y: clientY }
         : current.point;
       const released = gestureMove(current, point, performance.now());
       const result = gestureUp(released);
-      if (native.type !== "pointercancel" && result.tap) {
+      const peeking = carryingUp.phase === "carrying" && carryingUp.peeked;
+      const peekDrop = peeking && surface === "grid";
+      if (kind !== "pointercancel" && result.tap && !peeking) {
         const eventId = event.id;
         let sawClick = false;
         const note = () => { sawClick = true; };
@@ -1145,13 +1177,13 @@ export function CalendarShell(props: Props) {
         setGesture({ phase: "idle" });
         return;
       }
-      if (released.phase === "lifted" && carryingUp.phase === "carrying" && (surface !== "grid" || !result.commit)) {
+      if (released.phase === "lifted" && carryingUp.phase === "carrying" && !peekDrop && (surface !== "grid" || !result.commit)) {
         finishGesture(released, surface);
         gestureRef.current = { phase: "idle" };
         setGesture({ phase: "idle" });
         return;
       }
-      if (result.commit && released.phase === "lifted") {
+      if (released.phase === "lifted" && (result.commit || peekDrop)) {
         suppressClick.current = true;
         window.setTimeout(() => { suppressClick.current = false; }, 100);
         const face = gridRef.current?.querySelector(`[data-testid="block-${released.eventId}"] .face`);
@@ -1165,9 +1197,39 @@ export function CalendarShell(props: Props) {
       gestureRef.current = { phase: "idle" };
       setGesture({ phase: "idle" });
     }
-    window.addEventListener("pointermove", move);
-    window.addEventListener("pointerup", up);
-    window.addEventListener("pointercancel", up);
+    function onPointerMove(native: PointerEvent) {
+      if (native.pointerId !== pointerId) return;
+      applyMove(native.clientX, native.clientY);
+    }
+    function onPointerUp(native: PointerEvent) {
+      if (native.pointerId !== pointerId) return;
+      applyUp(native.clientX, native.clientY, native.type === "pointercancel" ? "pointercancel" : "pointerup");
+    }
+    function activeTouch(native: TouchEvent): Touch | null {
+      const exact = native.touches.length
+        ? Array.from(native.touches).find((t) => t.identifier === touchId)
+        : Array.from(native.changedTouches).find((t) => t.identifier === touchId);
+      if (exact) return exact;
+      return native.touches[0] ?? native.changedTouches[0] ?? null;
+    }
+    function onTouchMove(native: TouchEvent) {
+      const t = activeTouch(native);
+      if (!t) return;
+      applyMove(t.clientX, t.clientY);
+    }
+    function onTouchEnd(native: TouchEvent) {
+      const ended = activeTouch(native);
+      if (!ended) return;
+      applyUp(ended.clientX, ended.clientY, "pointerup");
+    }
+    window.addEventListener("pointermove", onPointerMove);
+    window.addEventListener("pointerup", onPointerUp);
+    window.addEventListener("pointercancel", onPointerUp);
+    if (touch) {
+      window.addEventListener("touchmove", onTouchMove, { passive: true });
+      window.addEventListener("touchend", onTouchEnd);
+      window.addEventListener("touchcancel", onTouchEnd);
+    }
   }
 
   function onGridPointerDown(pointer: React.PointerEvent<HTMLDivElement>) {
@@ -1693,6 +1755,17 @@ export function CalendarShell(props: Props) {
         data-momentum="0"
         aria-busy={props.loading}
         onPointerDownCapture={onGridPointerDown}
+        onTouchStartCapture={(event) => {
+          if (crossDayRef.current.phase !== "carrying" || !crossDayRef.current.peeked) return;
+          const touch = event.changedTouches[0];
+          if (!touch) return;
+          resumeCrossDayPointerDrag({
+            pointerId: touch.identifier,
+            clientX: touch.clientX,
+            clientY: touch.clientY,
+            pointerType: "touch",
+          });
+        }}
         onScroll={(e) => {
           const node = e.currentTarget;
           node.dataset.momentum = node.scrollTop !== parseFloat(node.dataset.lastScroll || "0") ? "1" : "0";
@@ -1822,7 +1895,7 @@ export function CalendarShell(props: Props) {
           <p className="sub">{(props.meta?.sync_label || "").replaceAll("NOT synced", "Not synced")}</p>
         </div>
       </div>
-      {traySaveMessage ? (
+      {traySaveMessage && (trayHoldUntilAnchor == null || anchor === trayHoldUntilAnchor) ? (
         <div className="tray-save-message" data-testid="tray-save-message" role="status">
           <button
             type="button"
@@ -2004,13 +2077,16 @@ function previewFrom(
   const scrollTop = grid.scrollTop;
   const originY = gesture.origin.y - rect.top + scrollTop;
   const pointY = gesture.point.y - rect.top + scrollTop;
+  const travel = Math.hypot(gesture.point.x - gesture.origin.x, gesture.point.y - gesture.origin.y);
+  const absDrop = crossPeeking && travel < COMMIT_PX;
+  const pxPerHour = mode === "day" ? DAY_PX : WEEK_PX;
   const moved = moveByPointer({
-    originStart: origin.startHour,
+    originStart: absDrop ? 0 : origin.startHour,
     originDay: Math.max(0, origin.dayIndex),
     duration: origin.duration,
-    deltaY: pointY - originY,
+    deltaY: absDrop ? pointY : pointY - originY,
     pointerX: gesture.point.x - rect.left,
-    pxPerHour: mode === "day" ? DAY_PX : WEEK_PX,
+    pxPerHour,
     gutter: mode === "day" ? DAY_GUTTER : WEEK_GUTTER,
     columnWidth: mode === "day" ? width : weekColumnWidth(width),
     allowDayChange: mode === "week",
@@ -2018,7 +2094,7 @@ function previewFrom(
     dayKey,
     timeZone,
   });
-  if (Math.hypot(gesture.point.x - gesture.origin.x, gesture.point.y - gesture.origin.y) < COMMIT_PX) return null;
+  if (travel < COMMIT_PX && !crossPeeking) return null;
   return {
     id: origin.id,
     dayIndex: moved.day,
